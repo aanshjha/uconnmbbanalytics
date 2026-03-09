@@ -1,0 +1,31 @@
+# OS / editor noise
+.DS_Store
+.Rproj.user/
+*.Rproj
+
+# Local R session state
+.RData
+.Rhistory
+.Rapp.history
+
+# Local virtual environments / temp tooling
+.venv/
+.venv_pdf/
+.tmp_pdfenv/
+
+# Private source data and working notes
+_data/
+Notes/
+
+# Generated pipeline outputs and logs
+_outputs/
+
+# Heavy generated model artifacts (reproducible from scripts + data)
+_models/*.rds
+_models/backtests/
+
+# Local database/cache noise
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
