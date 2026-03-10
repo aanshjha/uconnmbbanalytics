@@ -4,7 +4,6 @@
 manual_csv_search_dirs <- function() {
   c(
     file.path("_data", "03_manual_game_csv"),
-    file.path("_data", "03_manual_game_csv", "_games"),
     file.path("_data", "03_manual_game_csv", "_conf"),
     file.path("_data", "03_manual_game_csv", "_nc")
   )

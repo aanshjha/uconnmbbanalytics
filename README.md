@@ -102,7 +102,7 @@ If you're using the private working copy, read these sections next:
 Public reviewers should start with `public_examples/` and the code paths listed in `Validation`.
 
 1. Run `bash run_coaching_pipeline.sh` for the full lineup/defense/audit pipeline once the private data inputs are in place.
-2. Open `_outputs/05_decision_audit/uconn_lineup_decision_table.csv` (main lineup action table).
+2. Open `_outputs/01_lineup_core/uconn_lineup_coach_view.csv` (main lineup action table).
 3. Open `_outputs/05_decision_audit/uconn_pred_pr_net_pos_calibration_metrics.csv` (calibration check for this run).
 4. Open `_outputs/02_defense_leaks/uconn_lineup_def_leaks_coach_table.csv` (defense risk watchlist by lineup).
 5. If QC fails, fix the source issue and rerun (do not hand-edit output CSVs).
@@ -190,10 +190,9 @@ Folder: `_outputs/03_players`
 Primary files:
 
 1. `uconn_player_net_posterior.csv`
-2. `uconn_player_net_ranking.csv`
-3. `uconn_player_rsi.csv`
-4. `uconn_player_rsi_coach_table.csv`
-5. `uconn_player_rsi_three_windows.csv`
+2. `uconn_player_rsi.csv`
+3. `uconn_player_rsi_coach_table.csv`
+4. `uconn_player_rsi_three_windows.csv`
 
 #### 4) Decision Audit
 
@@ -201,11 +200,11 @@ Folder: `_outputs/05_decision_audit`
 
 Primary files:
 
-1. `uconn_lineup_decision_table.csv`
-2. `uconn_lineup_decision_rolling_backtest_rows.csv`
-3. `uconn_lineup_decision_rolling_backtest_by_bucket.csv`
-4. `uconn_lineup_decision_rolling_backtest_by_game_bucket.csv`
-5. `uconn_lineup_decision_rule_v2_thresholds.csv`
+1. `uconn_lineup_decision_rolling_backtest_rows.csv`
+2. `uconn_lineup_decision_rolling_backtest_by_bucket.csv`
+3. `uconn_lineup_decision_rolling_backtest_by_game_bucket.csv`
+4. `uconn_lineup_decision_rule_v2_thresholds.csv`
+5. `uconn_pred_pr_net_pos_calibration_metrics.csv`
 6. `uconn_pred_pr_net_pos_calibration_model.csv`
 7. `uconn_pred_pr_net_pos_calibration_deciles.csv`
 8. `uconn_pred_pr_net_pos_calibration_metrics.csv`
@@ -357,9 +356,9 @@ Key fields:
 1. `synergy_mean`, `synergy_p05`, `synergy_p50`, `synergy_p95` (posterior summary columns; see defined term above)
 2. `pr_synergy_pos`
 
-#### `uconn_lineup_coach_view.csv` and `uconn_lineup_decision_table.csv`
+#### `uconn_lineup_coach_view.csv`
 
-Both currently carry the same coach decision layer.
+This is the canonical coach decision layer.
 
 Key decision fields:
 
@@ -824,7 +823,7 @@ The project routes outputs into these folders:
 
 For a coaching decision pass, read in this order:
 
-1. `_outputs/05_decision_audit/uconn_lineup_decision_table.csv`
+1. `_outputs/01_lineup_core/uconn_lineup_coach_view.csv`
 2. `_outputs/02_defense_leaks/uconn_lineup_def_leaks_coach_table.csv`
 3. `_outputs/03_players/uconn_player_rsi_coach_table.csv`
 4. `_outputs/05_decision_audit/uconn_availability_stress_test_report.csv`
@@ -1569,7 +1568,6 @@ If this section feels overwhelming on first read, skip it and come back later (t
 | `./_scripts/models/fit_lineup_defensive_leak_model.R` | other | 367 | Defense-only lineup model for leak-risk outputs. | uconn_stints_from_pbp.csv; uconn_games_meta.csv; opponent_controls.csv; uconn_lineup_gamelevel_defonly.stan; uconn_lineup_gamelevel_defonly_fit.rds | uconn_lineup_def_leaks_posterior.csv; uconn_lineup_def_leaks_model_diagnostics.csv |
 | `./_scripts/models/fit_scheme_matchup_model.R` | other | 875 | Scheme matchup model for possession-level PPP. | possessions.csv; uconn_possessions.csv; scheme_tags.csv; uconn_scheme_tags.csv; events.csv; uconn_events.csv; games.csv; uconn_games.csv; teams.csv; uconn_teams.csv; lineups.csv; uconn_lineups.csv; uconn_scheme_matchup_ppp.stan; uconn_scheme_matchup_ppp_fit.rds | uconn_scheme_matchup_model_diagnostics.csv; uconn_scheme_matchup_cell_summary.csv; uconn_scheme_matchup_opponent_prep_table.csv; uconn_scheme_matchup_do_not_run.csv; uconn_scheme_matchup_lineup_recommendations.csv; uconn_scheme_matchup_calibration.csv; uconn_scheme_matchup_oos_lift.csv; uconn_scheme_matchup_model_meta.csv |
 | `./_scripts/ops/cleanup_project.R` | other | 76 | !/usr/bin/env Rscript / / 1) Remove Finder metadata noise. / / 2) Detect archive duplicate-style filenames. | * 2.csv; _data/01_core_inputs/uconn_games_meta.csv |  |
-| `./_scripts/ops/organize_output_files.R` | other | 205 | Organize top-level files in _outputs into fixed subfolders. / / Keeps the output tree readable after full pipeline runs. / / Ensure folders exist | organize_manifest.csv |  |
 | `./_scripts/pipeline/run_coaching_pipeline.R` | other | 607 | Runs the lineup, defense, and audit workflow. | organize_manifest.csv; uconn_stints_from_pbp.csv; uconn_games_meta.csv; opponent_controls.csv; _scripts/pipeline/run_rolling_lineup_decision_backtest.R; _scripts/analysis/evaluate_net_probability_calibration.R; _scripts/models/fit_core_lineup_model.R; _scripts/analysis/build_player_role_stability_table.R; _scripts/analysis/analyze_player_role_stability_by_phase.R; _scripts/models/fit_lineup_defensive_leak_model.R; _scripts/analysis/build_defensive_leak_coach_table.R; _scripts/analysis/validate_defensive_leak_signal_holdout.R; _scripts/analysis/build_lineup_stability_baselines.R; _scripts/analysis/attribute_defensive_leaks_by_game.R; _scripts/analysis/build_game_level_defensive_trend.R; _scripts/pipeline/run_lineup_availability_stress_test.R; _scripts/analysis/audit_lineup_decision_eligibility.R; _outputs/01_lineup_core/uconn_lineup_coach_view.csv; _outputs/uconn_lineup_coach_view.csv; _outputs/05_decision_audit/uconn_lineup_decision_table.csv; _outputs/01_lineup_core/uconn_lineup_decision_table.csv; _outputs/uconn_lineup_decision_table.csv; _outputs/01_lineup_core/uconn_lineup_usage.csv; _outputs/uconn_lineup_usage.csv; _outputs/02_defense_leaks/uconn_lineup_def_leaks_posterior.csv; _outputs/uconn_lineup_def_leaks_posterior.csv; _outputs/03_players/uconn_player_rsi_coach_table.csv; _outputs/uconn_player_rsi_coach_table.csv; _outputs/05_decision_audit/uconn_lineup_decision_rolling_backtest_rows.csv; _outputs/uconn_lineup_decision_rolling_backtest_rows.csv; _outputs/05_decision_audit/uconn_pred_pr_net_pos_calibration_metrics.csv; _outputs/uconn_pred_pr_net_pos_calibration_metrics.csv; _outputs/05_decision_audit/uconn_decision_eligibility_by_stint.csv; _outputs/uconn_decision_eligibility_by_stint.csv |  |
 | `./_scripts/pipeline/run_lineup_availability_stress_test.R` | other | 174 | Quick stress test: remove one player and surface the best remaining / / lineup options under current risk thresholds. / / Config (env overrides make this script reproducible in automation/CLI) | uconn_lineup_stabilizers.csv; uconn_lineup_def_leaks_posterior.csv; uconn_availability_stress_test_report.csv |  |
 | `./_scripts/pipeline/run_rolling_lineup_decision_backtest.R` | other | 1447 | Rolling game-level holdout backtest for the lineup decision table. / / Trains on prior games only, scores the next game, and summarizes calibration / / plus realized outcomes by decision bucket. | uconn_stints_from_pbp.csv; uconn_games_meta.csv; opponent_controls.csv; uconn_lineup_gamelevel_offdef.stan; uconn_lineup_decision_rolling_backtest_rows.csv; uconn_lineup_decision_rolling_backtest_by_bucket.csv; uconn_lineup_decision_rolling_backtest_by_game_bucket.csv; uconn_lineup_decision_rolling_backtest_fit_diagnostics.csv; uconn_lineup_decision_rule_v2_thresholds.csv; uconn_pred_pr_net_pos_calibration_model.csv; uconn_lineup_bt_holdout_game_%02d_fit.rds |  |
@@ -2139,12 +2137,7 @@ Key logic:
 3. substitution-aware on-court lineup reconstruction
 4. summary report of written/skipped/missing games
 
-#### `_scripts/ops/organize_output_files.R`
-
-Purpose:
-
-1. route top-level output files into fixed bucket folders
-2. optionally archive prior bucket contents first
+Output organization now lives inside `_scripts/pipeline/run_coaching_pipeline.R` so there is one active organizer path instead of a second standalone copy that can drift.
 
 #### `_scripts/ops/cleanup_project.R`
 

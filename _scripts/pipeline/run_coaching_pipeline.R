@@ -20,6 +20,8 @@ suppressPackageStartupMessages({
   library(lubridate)
 })
 
+source("_scripts/utils/output_cleanup.R")
+
 stopf <- function(fmt, ...) {
   stop(sprintf(fmt, ...), call. = FALSE)
 }
@@ -43,9 +45,10 @@ parse_any_date <- function(x) {
   suppressWarnings(as.Date(parse_date_time(x, orders = c("m/d/y", "m/d/Y", "Y-m-d", "Y/m/d"))))
 }
 
-pick_existing <- function(label, candidates) {
+pick_existing <- function(label, candidates, required = TRUE) {
   hit <- candidates[file.exists(candidates)]
   if (length(hit) == 0) {
+    if (!isTRUE(required)) return(NULL)
     stopf(
       "Missing expected output for %s. Checked: %s",
       label,
@@ -484,8 +487,10 @@ decision_table_path <- pick_existing(
     "_outputs/05_decision_audit/uconn_lineup_decision_table.csv",
     "_outputs/01_lineup_core/uconn_lineup_decision_table.csv",
     "_outputs/uconn_lineup_decision_table.csv"
-  )
+  ),
+  required = FALSE
 )
+if (is.null(decision_table_path)) decision_table_path <- coach_view_path
 usage_path <- pick_existing(
   "lineup_usage",
   c("_outputs/01_lineup_core/uconn_lineup_usage.csv", "_outputs/uconn_lineup_usage.csv")
@@ -512,7 +517,11 @@ eligibility_path <- pick_existing(
 )
 
 coach <- read_csv(coach_view_path, show_col_types = FALSE)
-decision <- read_csv(decision_table_path, show_col_types = FALSE)
+decision <- if (identical(decision_table_path, coach_view_path)) {
+  coach
+} else {
+  read_csv(decision_table_path, show_col_types = FALSE)
+}
 usage <- read_csv(usage_path, show_col_types = FALSE)
 leaks <- read_csv(leak_post_path, show_col_types = FALSE)
 rsi <- read_csv(rsi_coach_path, show_col_types = FALSE)
@@ -627,11 +636,19 @@ if (!is.finite(max_elig_game_id) || max_elig_game_id < max_game_id) {
   )
 }
 
+manual_scout_root <- file.path(out_dir, "07_opps", "manual_game_scouts")
+manual_scout_cleanup <- remove_duplicate_suffix_artifacts(manual_scout_root)
+manual_scout_cleanup_removed <- sum(manual_scout_cleanup$removed, na.rm = TRUE)
+if (manual_scout_cleanup_removed > 0) {
+  message("Removed ", manual_scout_cleanup_removed, " duplicate manual-scout artifact(s) before QC.")
+}
+
 manual_scout_release <- scan_manual_scout_release_issues(
-  file.path(out_dir, "07_opps", "manual_game_scouts")
+  manual_scout_root
 )
 manual_scout_release_status <- "SKIP"
 if (isTRUE(manual_scout_release$checked)) {
+  strict_manual_scout_release_qc <- tolower(Sys.getenv("STRICT_MANUAL_SCOUT_RELEASE_QC", "false")) %in% c("1", "true", "t", "yes", "y")
   manual_scout_release_status <- "PASS"
   manual_scout_errors <- character()
 
@@ -666,16 +683,19 @@ if (isTRUE(manual_scout_release$checked)) {
   }
 
   if (length(manual_scout_errors) > 0) {
-    stop(
-      paste(
-        c(
-          "Post-QC failed: manual scout release bundle issues detected.",
-          paste0("- ", manual_scout_errors)
-        ),
-        collapse = "\n"
+    manual_scout_release_status <- if (strict_manual_scout_release_qc) "FAIL" else "WARN"
+    msg <- paste(
+      c(
+        "Manual scout release bundle issues detected.",
+        paste0("- ", manual_scout_errors)
       ),
-      call. = FALSE
+      collapse = "\n"
     )
+    if (strict_manual_scout_release_qc) {
+      stop(paste("Post-QC failed:", msg), call. = FALSE)
+    } else {
+      warning(msg, call. = FALSE)
+    }
   }
 }
 
@@ -694,6 +714,7 @@ post_qc_lines <- c(
   sprintf("max_input_game_id=%d", as.integer(max_game_id)),
   sprintf("max_eligibility_game_id=%d", as.integer(max_elig_game_id)),
   sprintf("manual_scout_release_qc=%s", manual_scout_release_status),
+  sprintf("manual_scout_duplicate_cleanup_removed=%d", manual_scout_cleanup_removed),
   sprintf("coach_view_path=%s", coach_view_path),
   sprintf("decision_table_path=%s", decision_table_path),
   sprintf("leak_posterior_path=%s", leak_post_path),

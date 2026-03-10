@@ -18,6 +18,8 @@ suppressPackageStartupMessages({
   library(jsonlite)
 })
 
+source("_scripts/utils/manual_game_data.R")
+
 args <- commandArgs(trailingOnly = TRUE)
 arg_value <- function(key, default = NULL) {
   hit <- grep(paste0("^--", key, "="), args, value = TRUE)
@@ -909,10 +911,14 @@ find_event_id <- function(game_date, opponent, uconn_is_home) {
 
 overwrite <- to_bool(arg_value("overwrite", "false"), default = FALSE)
 include_exhibitions <- to_bool(arg_value("include-exhibitions", "false"), default = FALSE)
-out_dir <- arg_value("out-dir", "_data/03_manual_game_csv/_games")
+out_root <- arg_value("out-dir", manual_csv_root_dir())
 game_files_arg <- arg_value("game-files", "")
 
-if (!dir.exists(out_dir)) dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+if (basename(normalizePath(out_root, winslash = "/", mustWork = FALSE)) == "_games") {
+  out_root <- dirname(out_root)
+}
+dir.create(out_root, recursive = TRUE, showWarnings = FALSE)
+ensure_manual_csv_dirs(out_root)
 
 games_meta <- read_csv("_data/01_core_inputs/uconn_games_meta.csv", show_col_types = FALSE) %>%
   mutate(
@@ -936,12 +942,18 @@ results <- list()
 for (i in seq_len(nrow(games_meta))) {
   g <- games_meta[i, ]
   game_file <- g$game_file[[1]]
+  competition_bucket <- infer_competition_bucket(g)
   out_name <- str_remove(game_file, "\\.pdf$") %>% str_trim()
-  out_path <- file.path(out_dir, paste0(out_name, ".csv"))
+  out_path <- manual_csv_output_path(g, root_dir = out_root)
 
   if (file.exists(out_path) && !overwrite) {
     message("[SKIP] ", game_file, " (exists)")
-    results[[length(results) + 1]] <- tibble(game_file = game_file, status = "skipped_exists", out_path = out_path)
+    results[[length(results) + 1]] <- tibble(
+      game_file = game_file,
+      competition_bucket = competition_bucket,
+      status = "skipped_exists",
+      out_path = out_path
+    )
     next
   }
 
@@ -953,7 +965,12 @@ for (i in seq_len(nrow(games_meta))) {
 
   if (is.na(event_id)) {
     message("[MISS] ", game_file, " (no matching ESPN event)")
-    results[[length(results) + 1]] <- tibble(game_file = game_file, status = "missing_event", out_path = out_path)
+    results[[length(results) + 1]] <- tibble(
+      game_file = game_file,
+      competition_bucket = competition_bucket,
+      status = "missing_event",
+      out_path = out_path
+    )
     next
   }
 
@@ -978,15 +995,26 @@ for (i in seq_len(nrow(games_meta))) {
     rosters = rosters,
     game_meta = g,
     season_context = season_context
-  )
+  ) %>%
+    mutate(
+      competition_bucket = competition_bucket,
+      .before = game_file
+    )
+  dir.create(dirname(out_path), recursive = TRUE, showWarnings = FALSE)
   write_csv(out_tbl, out_path, na = "")
-  message("[DONE] ", out_name, ".csv (rows=", nrow(out_tbl), ")")
+  message("[DONE] ", basename(out_path), " (rows=", nrow(out_tbl), ")")
 
-  results[[length(results) + 1]] <- tibble(game_file = game_file, status = "written", out_path = out_path, rows = nrow(out_tbl))
+  results[[length(results) + 1]] <- tibble(
+    game_file = game_file,
+    competition_bucket = competition_bucket,
+    status = "written",
+    out_path = out_path,
+    rows = nrow(out_tbl)
+  )
 }
 
 res <- bind_rows(results)
-summary_path <- file.path(out_dir, "_espn_generation_summary.csv")
+summary_path <- file.path(out_root, "_espn_generation_summary.csv")
 write_csv(res, summary_path)
 
 message("\nComplete.")

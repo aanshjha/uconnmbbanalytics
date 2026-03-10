@@ -17,6 +17,8 @@ suppressPackageStartupMessages({
   library(stringr)
 })
 
+source("_scripts/utils/output_cleanup.R")
+
 
 cat("=== Project Cleanup ===\n")
 
@@ -29,14 +31,26 @@ if (length(ds_files) > 0) {
   cat("Removed .DS_Store: 0 (none found)\n")
 }
 
-# 2) Detect archive duplicate-style filenames.
-dup_named <- list.files(
-  "_outputs/_archive",
-  pattern = " 2\\.csv$",
-  recursive = TRUE,
-  full.names = TRUE
-)
-cat(sprintf("Archive files named '* 2.csv': %d\n", length(dup_named)))
+# 2) Remove duplicate-suffix release artifacts when the canonical file exists.
+live_outputs_root <- "_outputs"
+dup_cleanup <- remove_duplicate_suffix_artifacts(live_outputs_root)
+dup_found <- nrow(dup_cleanup)
+dup_removed <- sum(dup_cleanup$removed, na.rm = TRUE)
+dup_blocked <- sum(!dup_cleanup$removed & dup_cleanup$canonical_exists, na.rm = TRUE)
+dup_orphaned <- sum(!dup_cleanup$canonical_exists, na.rm = TRUE)
+cat(sprintf("Duplicate-suffix artifacts found under _outputs: %d\n", dup_found))
+cat(sprintf("Duplicate-suffix artifacts removed: %d\n", dup_removed))
+cat(sprintf("Duplicate-suffix artifacts blocked from removal: %d\n", dup_blocked))
+cat(sprintf("Duplicate-suffix artifacts missing canonical original: %d\n", dup_orphaned))
+
+if (dup_orphaned > 0) {
+  print(
+    dup_cleanup %>%
+      filter(!canonical_exists) %>%
+      select(duplicate_path, canonical_path) %>%
+      head(10)
+  )
+}
 
 # 3) Check game metadata consistency: opponent should appear in matchup_header.
 games_path <- "_data/01_core_inputs/uconn_games_meta.csv"

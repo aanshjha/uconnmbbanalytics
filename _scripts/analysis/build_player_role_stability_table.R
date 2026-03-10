@@ -25,7 +25,6 @@ DATA_DIRS <- c(
   file.path(ROOT, "_data", "01_core_inputs"),
   file.path(ROOT, "_data", "02_derived_inputs"),
   file.path(ROOT, "_data", "03_manual_game_csv"),
-  file.path(ROOT, "_data", "03_manual_game_csv", "_games"),
   file.path(ROOT, "_data", "03_manual_game_csv", "_conf"),
   file.path(ROOT, "_data", "03_manual_game_csv", "_nc"),
   file.path(ROOT, "_data", "04_templates"),

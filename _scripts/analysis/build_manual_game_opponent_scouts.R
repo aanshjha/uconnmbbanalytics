@@ -18,6 +18,8 @@ suppressPackageStartupMessages({
   library(ggplot2)
 })
 
+source("_scripts/utils/manual_game_data.R")
+
 args <- commandArgs(trailingOnly = TRUE)
 
 arg_value <- function(key, default = NULL) {
@@ -93,47 +95,17 @@ meeting_site_label <- function(site_type, uconn_is_home) {
   )
 }
 
-manual_dir <- file.path("_data", "03_manual_game_csv", "_games")
-conf_manual_dir <- file.path("_data", "03_manual_game_csv", "_conf")
-nc_manual_dir <- file.path("_data", "03_manual_game_csv", "_nc")
+manual_root <- manual_csv_root_dir()
 out_dir <- arg_value("out-dir", file.path("_outputs", "07_opps", "manual_game_scouts"))
 opponents_arg <- arg_value("opponents", "")
 dates_arg <- arg_value("dates", "")
 min_player_events <- suppressWarnings(as.integer(arg_value("min-player-events", "5")))
 min_lineup_events <- suppressWarnings(as.integer(arg_value("min-lineup-events", "8")))
 
-if (!dir.exists(manual_dir) || !dir.exists(conf_manual_dir) || !dir.exists(nc_manual_dir)) {
-  stop("Missing manual-game CSV split directories under _data/03_manual_game_csv.", call. = FALSE)
-}
 dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
 
-conf_manual_files <- list.files(conf_manual_dir, pattern = "\\.csv$", full.names = FALSE)
-conf_manual_files <- conf_manual_files[conf_manual_files != "_espn_generation_summary.csv"]
-nc_manual_files <- list.files(nc_manual_dir, pattern = "\\.csv$", full.names = FALSE)
-nc_manual_files <- nc_manual_files[nc_manual_files != "_espn_generation_summary.csv"]
-
-manual_files <- list.files(manual_dir, pattern = "\\.csv$", full.names = TRUE)
-manual_files <- manual_files[basename(manual_files) != "_espn_generation_summary.csv"]
-if (length(manual_files) == 0) {
-  stop("No manual-game CSV files found in ", manual_dir, call. = FALSE)
-}
-
-message("Loading manual-game CSVs: ", length(manual_files))
-
-manual_games <- bind_rows(lapply(manual_files, function(path) {
-  read_csv(path, show_col_types = FALSE) %>%
-    mutate(
-      source_path = path,
-      source_file = basename(path)
-    )
-}))
-
-char_cols <- names(manual_games)[vapply(manual_games, is.character, logical(1))]
-manual_games[char_cols] <- lapply(manual_games[char_cols], function(col) {
-  out <- str_trim(col)
-  out[out == ""] <- NA_character_
-  out
-})
+manual_games <- load_manual_games(manual_root)
+message("Loading manual-game CSVs: ", n_distinct(manual_games$source_file))
 
 manual_games <- manual_games %>%
   mutate(
@@ -151,11 +123,7 @@ manual_games <- manual_games %>%
     opponent = as.character(opponent),
     game_file = as.character(game_file),
     site_type = as.character(site_type),
-    competition_bucket = case_when(
-      source_file %in% conf_manual_files ~ "conference",
-      source_file %in% nc_manual_files ~ "non_conference",
-      TRUE ~ NA_character_
-    ),
+    competition_bucket = normalize_competition_bucket(competition_bucket),
     meeting_site = meeting_site_label(site_type, uconn_is_home),
     opponent_slug = slugify(opponent),
     game_slug = paste0(as.character(game_date), "__", opponent_slug, "__", meeting_site),
@@ -431,6 +399,37 @@ build_offensive_lineup_profile <- function(df, min_events) {
       .groups = "drop"
     ) %>%
     arrange(desc(opponent_points), desc(opponent_fga), offense_lineup_key)
+}
+
+build_lineup_matchup_matrix <- function(df, min_events) {
+  df %>%
+    mutate(
+      team_context = if_else(is_uconn_offense %in% TRUE, "UConn offense", "Opponent offense")
+    ) %>%
+    group_by(team_context, offense_lineup_key, defense_lineup_key) %>%
+    summarise(
+      event_rows = n(),
+      fga = sum(FGA, na.rm = TRUE),
+      fgm = sum(FGM, na.rm = TRUE),
+      fg_pct = pct(fgm, fga),
+      fta = sum(FTA, na.rm = TRUE),
+      ftm = sum(FTM, na.rm = TRUE),
+      three_pa = sum(FGA3, na.rm = TRUE),
+      three_pm = sum(FGM3, na.rm = TRUE),
+      points = sum(PTS, na.rm = TRUE),
+      turnovers = sum(TOV, na.rm = TRUE),
+      live_ball_turnovers = sum(live_ball_turnover %in% TRUE, na.rm = TRUE),
+      assisted_makes = sum(assisted_make %in% TRUE, na.rm = TRUE),
+      self_created_makes = sum(self_created_make %in% TRUE, na.rm = TRUE),
+      assisted_make_rate = pct(assisted_makes, fgm),
+      rim_fga = sum(FGA == 1 & shot_zone == "RIM", na.rm = TRUE),
+      paint_fga = sum(FGA == 1 & paint_zone == "PAINT", na.rm = TRUE),
+      corner_3_fga = sum(FGA == 1 & shot_zone == "CORNER_3", na.rm = TRUE),
+      above_break_3_fga = sum(FGA == 1 & shot_zone == "ABOVE_BREAK_3", na.rm = TRUE),
+      sample_flag = if_else(event_rows >= min_events, "ok", "small_sample"),
+      .groups = "drop"
+    ) %>%
+    arrange(team_context, desc(points), desc(fga), offense_lineup_key, defense_lineup_key)
 }
 
 build_clutch_log <- function(df) {
@@ -848,12 +847,40 @@ render_summary_md <- function(summary_tbl,
     "- `creation/assist_connections.csv`",
     "- `lineups/defense_shot_allowance.csv`",
     "- `lineups/opponent_offense_profile.csv`",
+    "- `lineups/matchup_matrix.csv`",
     "- `players/profile.csv`",
     "- `players/zone_detail.csv`",
     "- `clutch/event_log.csv`"
   )
 
   writeLines(lines, con = file.path(meeting_dir, "summary", "report_summary.md"))
+}
+
+build_player_meeting_comparison <- function(df, min_events) {
+  df %>%
+    filter(is_uconn_offense %in% FALSE) %>%
+    group_by(game_date, meeting_site, game_file, UsagePlayer) %>%
+    summarise(
+      event_rows = n(),
+      fga = sum(FGA, na.rm = TRUE),
+      fgm = sum(FGM, na.rm = TRUE),
+      fg_pct = pct(fgm, fga),
+      fta = sum(FTA, na.rm = TRUE),
+      ftm = sum(FTM, na.rm = TRUE),
+      points = sum(PTS, na.rm = TRUE),
+      turnovers = sum(TOV, na.rm = TRUE),
+      live_ball_turnovers = sum(live_ball_turnover %in% TRUE, na.rm = TRUE),
+      assisted_makes = sum(assisted_make %in% TRUE, na.rm = TRUE),
+      self_created_makes = sum(self_created_make %in% TRUE, na.rm = TRUE),
+      assisted_make_rate = pct(assisted_makes, fgm),
+      rim_fga = sum(FGA == 1 & shot_zone == "RIM", na.rm = TRUE),
+      paint_fga = sum(FGA == 1 & paint_zone == "PAINT", na.rm = TRUE),
+      corner_3_fga = sum(FGA == 1 & shot_zone == "CORNER_3", na.rm = TRUE),
+      above_break_3_fga = sum(FGA == 1 & shot_zone == "ABOVE_BREAK_3", na.rm = TRUE),
+      sample_flag = if_else(event_rows >= min_events, "ok", "small_sample"),
+      .groups = "drop"
+    ) %>%
+    arrange(game_date, desc(points), desc(fga), UsagePlayer)
 }
 
 meeting_summaries <- list()
@@ -899,6 +926,7 @@ for (i in seq_len(nrow(games_index))) {
   assist_connections <- build_assist_connections(opp_off)
   defensive_lineups <- build_defensive_lineup_allowance(opp_def, min_lineup_events)
   offensive_lineups <- build_offensive_lineup_profile(opp_off, min_lineup_events)
+  matchup_matrix <- build_lineup_matchup_matrix(meeting_df, min_lineup_events)
   clutch_log <- build_clutch_log(meeting_df)
 
   write_csv(meeting_summary, file.path(summary_dir, "meeting_summary.csv"))
@@ -912,6 +940,7 @@ for (i in seq_len(nrow(games_index))) {
   write_csv(assist_connections, file.path(creation_dir, "assist_connections.csv"))
   write_csv(defensive_lineups, file.path(lineups_dir, "defense_shot_allowance.csv"))
   write_csv(offensive_lineups, file.path(lineups_dir, "opponent_offense_profile.csv"))
+  write_csv(matchup_matrix, file.path(lineups_dir, "matchup_matrix.csv"))
   write_csv(clutch_log, file.path(clutch_dir, "event_log.csv"))
 
   unlink(file.path(meeting_dir, c(
@@ -1020,6 +1049,15 @@ for (bucket in unique(manifest$competition_bucket)) {
       arrange(game_date)
 
     write_csv(opp_summary, file.path(opp_dir, "meeting_comparison.csv"))
+
+    opp_player_comparison <- manual_games %>%
+      filter(
+        competition_bucket == bucket,
+        opponent_slug == opp
+      ) %>%
+      build_player_meeting_comparison(min_player_events)
+
+    write_csv(opp_player_comparison, file.path(opp_dir, "player_meeting_comparison.csv"))
   }
 }
 

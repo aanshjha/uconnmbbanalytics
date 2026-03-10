@@ -20,52 +20,13 @@ suppressPackageStartupMessages({
 })
 
 source("_scripts/utils/project_paths.R")
+source("_scripts/utils/lineup_model_utils.R")
 
 rstan_options(auto_write = TRUE)
 options(mc.cores = parallel::detectCores())
 
 resolve_path <- function(fname) {
   resolve_project_path(fname)
-}
-
-ms_to_seconds <- function(x) {
-  x <- as.character(x)
-  x <- stringr::str_trim(x)
-  suppressWarnings(lubridate::period_to_seconds(lubridate::ms(x)))
-}
-
-fit_has_draws <- function(fit) {
-  # Returns TRUE if stanfit contains usable samples for alpha_net
-  if (is.null(fit)) return(FALSE)
-
-  # Quick check: can we coerce to draws?
-  draws_n <- tryCatch(nrow(as.data.frame(fit)), error = function(e) 0)
-  if (is.na(draws_n) || draws_n == 0) return(FALSE)
-
-  # Stronger check: alpha_net exists and is 2D
-  an <- tryCatch(rstan::extract(fit, pars = "alpha_net")$alpha_net,
-                 error = function(e) NULL)
-  if (is.null(an)) return(FALSE)
-  d <- dim(an)
-  if (is.null(d) || length(d) < 2) return(FALSE)
-
-  TRUE
-}
-
-safe_md5 <- function(path) {
-  x <- tryCatch(unname(tools::md5sum(path)), error = function(e) NA_character_)
-  as.character(x[[1]])
-}
-
-zscore_safe <- function(x) {
-  x <- as.numeric(x)
-  m <- mean(x, na.rm = TRUE)
-  s <- sd(x, na.rm = TRUE)
-  if (!is.finite(m)) m <- 0
-  if (!is.finite(s) || s <= 0) return(rep(0, length(x)))
-  out <- (x - m) / s
-  out[!is.finite(out)] <- 0
-  out
 }
 
 as_num_env <- function(name, default) {
@@ -122,23 +83,6 @@ apply_decision_calibration <- function(p_raw, calib_model, fallback_shrink = 0.8
 
   out[!is.finite(p_raw)] <- NA_real_
   pmin(pmax(out, 0.01), 0.99)
-}
-
-parse_period_index <- function(period) {
-  p <- stringr::str_trim(as.character(period))
-  out <- suppressWarnings(as.integer(p))
-
-  idx1 <- is.na(out) & stringr::str_detect(p, regex("^1st\\s+Half", ignore_case = TRUE))
-  idx2 <- is.na(out) & stringr::str_detect(p, regex("^2nd\\s+Half", ignore_case = TRUE))
-  out[idx1] <- 1L
-  out[idx2] <- 2L
-
-  ot_match <- stringr::str_match(p, regex("^OT\\s*(\\d+)", ignore_case = TRUE))[, 2]
-  ot_num <- suppressWarnings(as.integer(ot_match))
-  idx_ot <- is.na(out) & !is.na(ot_num)
-  out[idx_ot] <- 2L + ot_num[idx_ot]
-
-  out
 }
 
 stints_path <- resolve_path("uconn_stints_from_pbp.csv")
@@ -201,83 +145,21 @@ message(
   " | calibration_mode=", if (!is.null(calibration_model)) calibration_model$mode else "fallback_shrink"
 )
 
-stints <- readr::read_csv(
-  stints_path,
-  show_col_types = FALSE,
-  col_types = cols(
-    start_time = col_character(),
-    end_time   = col_character()
-  )
+model_inputs <- load_common_lineup_model_inputs(
+  stints_path = stints_path,
+  games_path = games_path,
+  opp_path = opp_path
 )
-
-games <- readr::read_csv(games_path, show_col_types = FALSE)
-if (!("site_type" %in% names(games))) games$site_type <- NA_character_
-
-games <- games %>%
-  filter(!str_detect(game_file, "Exhibition"))
-
-stints <- stints %>%
-  filter(!str_detect(game_file, "Exhibition"))
-
-# Clamp tiny possession counts before fitting.
-stints <- stints %>%
-  mutate(
-    poss_est = as.numeric(poss_est),
-    points_for = as.numeric(points_for),
-    points_against = as.numeric(points_against),
-    net_pts  = points_for - points_against
-  )
-
-tiny_poss <- stints %>%
-  filter(!is.na(poss_est), poss_est > 0, poss_est < 1) %>%
+stints <- model_inputs$stints
+games <- model_inputs$games
+games2 <- model_inputs$games_joined
+tiny_poss <- model_inputs$tiny_poss %>%
   select(game_file, period, stint_index, start_time, end_time, poss_est, net_pts)
 
 if (nrow(tiny_poss) > 0) {
   message("Found poss_est < 1 (will clamp to 1 to prevent Stan failure). Rows:")
   print(tiny_poss)
 }
-
-stints <- stints %>%
-  mutate(
-    poss_est = if_else(!is.na(poss_est) & poss_est > 0 & poss_est < 1, 1, poss_est),
-    net_ppp  = if_else(!is.na(poss_est) & poss_est > 0, net_pts / poss_est, NA_real_)
-  )
-
-# Rebuild stint-level score and time context from the play-by-play sequence.
-stints <- stints %>%
-  mutate(
-    period_num = parse_period_index(period),
-    start_clock_sec = ms_to_seconds(start_time),
-    elapsed_game_sec = case_when(
-      is.na(period_num) | is.na(start_clock_sec) ~ NA_real_,
-      period_num <= 1 ~ pmax(0, 1200 - start_clock_sec),
-      period_num == 2 ~ 1200 + pmax(0, 1200 - start_clock_sec),
-      TRUE ~ 2400 + pmax(0, period_num - 3) * 300 + pmax(0, 300 - pmin(start_clock_sec, 300))
-    ),
-    .row_id_restore = row_number()
-  ) %>%
-  group_by(game_file) %>%
-  arrange(period_num, desc(start_clock_sec), stint_index, .by_group = TRUE) %>%
-  mutate(
-    score_margin_start = lag(cumsum(coalesce(net_pts, 0)), default = 0)
-  ) %>%
-  ungroup() %>%
-  arrange(.row_id_restore) %>%
-  select(-.row_id_restore)
-
-opponent_controls <- read_csv(opp_path, show_col_types = FALSE) %>%
-  mutate(
-    game_date = format(mdy(game_date), "%m/%d/%y"),
-    opponent  = str_trim(opponent)
-  )
-
-games2 <- games %>%
-  mutate(
-    game_date = format(mdy(game_date), "%m/%d/%y"),
-    opponent  = str_trim(opponent),
-    site_home = if_else(uconn_is_home, 1.0, 0.0)
-  ) %>%
-  left_join(opponent_controls, by = c("game_date", "opponent"))
 
 missing <- games2 %>%
   filter(is.na(opp_adjO) | is.na(opp_adjD)) %>%
@@ -299,10 +181,7 @@ stints2 <- stints %>%
   ) %>%
   mutate(
     game_id = as.integer(factor(game_file, levels = games2$game_file)),
-    uconn_lineup_canon = sapply(
-      str_split(uconn_lineup, "\\|"),
-      function(x) paste(sort(str_trim(x)), collapse = "|")
-    ),
+    uconn_lineup_canon = canonicalize_lineup(uconn_lineup),
     y = net_ppp,
     w = poss_est
   ) %>%
@@ -389,7 +268,7 @@ if (!FORCE_REFIT && file.exists(fit_path)) {
       "Cached fit invalid (cache signature mismatch). Refitting."
     )
     fit <- NULL
-  } else if (!fit_has_draws(cached)) {
+  } else if (!fit_has_draws(cached, "alpha_net")) {
     message("Cached fit is missing samples. Refitting.")
     fit <- NULL
   } else {
@@ -432,7 +311,7 @@ if (is.null(fit)) {
     control = list(adapt_delta = 0.99, max_treedepth = 15)
   )
 
-  if (!fit_has_draws(fit)) {
+  if (!fit_has_draws(fit, "alpha_net")) {
     stop("Stan fit completed but produced no usable samples. Check Stan output/errors.")
   }
 
@@ -481,7 +360,8 @@ player_out <- tibble(
 deprecated_player_files <- c(
   "uconn_player_off_def_net_posterior.csv",
   "uconn_player_offense_ranking.csv",
-  "uconn_player_defense_ranking.csv"
+  "uconn_player_defense_ranking.csv",
+  "uconn_player_net_ranking.csv"
 )
 
 for (root in unique(c(out_dir, file.path(out_dir, "03_players")))) {
@@ -497,20 +377,25 @@ for (root in unique(c(out_dir, file.path(out_dir, "03_players")))) {
   }
 }
 
+deprecated_lineup_files <- c("uconn_lineup_decision_table.csv")
+
+for (root in unique(c(out_dir, file.path(out_dir, "01_lineup_core"), file.path(out_dir, "05_decision_audit")))) {
+  if (!dir.exists(root)) next
+  for (fname in deprecated_lineup_files) {
+    p <- file.path(root, fname)
+    if (file.exists(p)) {
+      ok <- file.remove(p)
+      if (isTRUE(ok)) {
+        message("Removed deprecated lineup output: ", normalizePath(p))
+      }
+    }
+  }
+}
+
 write_csv(player_out, file.path(out_dir, "uconn_player_net_posterior.csv"))
-write_csv(player_out %>% arrange(desc(net_mean)), file.path(out_dir, "uconn_player_net_ranking.csv"))
 
 stints_usage <- stints2 %>%
   mutate(
-    start_sec = ms_to_seconds(start_time),
-    end_sec   = ms_to_seconds(end_time),
-    dur_sec_raw = start_sec - end_sec,
-    dur_sec = case_when(
-      is.na(dur_sec_raw) ~ NA_real_,
-      dur_sec_raw >= 0   ~ dur_sec_raw,
-      TRUE               ~ abs(dur_sec_raw)
-    ),
-    dur_min = dur_sec / 60,
     net_pts_stint = y * w
   )
 
@@ -682,7 +567,6 @@ coach_view <- lineup_bayes %>%
   )
 
 write_csv(coach_view, file.path(out_dir, "uconn_lineup_coach_view.csv"))
-write_csv(coach_view, file.path(out_dir, "uconn_lineup_decision_table.csv"))
 
 message("Done. Wrote to: ", normalizePath(out_dir))
 message("Model cache: ", normalizePath(fit_path))

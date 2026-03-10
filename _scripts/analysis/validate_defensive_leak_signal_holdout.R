@@ -23,81 +23,14 @@ suppressPackageStartupMessages({
 })
 
 source("_scripts/utils/project_paths.R")
+source("_scripts/utils/lineup_model_utils.R")
 
 rstan_options(auto_write = TRUE)
 options(mc.cores = parallel::detectCores())
 
 
-# ---------- Helpers ----------
 resolve_path <- function(fname) {
   resolve_project_path(fname)
-}
-
-fit_has_draws <- function(fit, par = "alpha_def") {
-  if (is.null(fit)) return(FALSE)
-  draws_n <- tryCatch(nrow(as.data.frame(fit)), error = function(e) 0)
-  if (is.na(draws_n) || draws_n == 0) return(FALSE)
-  arr <- tryCatch(rstan::extract(fit, pars = par)[[par]], error = function(e) NULL)
-  if (is.null(arr)) return(FALSE)
-  d <- dim(arr)
-  if (is.null(d) || length(d) < 2) return(FALSE)
-  TRUE
-}
-
-safe_md5 <- function(path) {
-  x <- tryCatch(unname(tools::md5sum(path)), error = function(e) NA_character_)
-  as.character(x[[1]])
-}
-
-ms_to_seconds <- function(x) {
-  x <- as.character(x)
-  x <- stringr::str_trim(x)
-  suppressWarnings(lubridate::period_to_seconds(lubridate::ms(x)))
-}
-
-parse_period_index <- function(period) {
-  p <- stringr::str_trim(as.character(period))
-  out <- suppressWarnings(as.integer(p))
-
-  idx1 <- is.na(out) & stringr::str_detect(p, regex("^1st\\s+Half", ignore_case = TRUE))
-  idx2 <- is.na(out) & stringr::str_detect(p, regex("^2nd\\s+Half", ignore_case = TRUE))
-  out[idx1] <- 1L
-  out[idx2] <- 2L
-
-  ot_match <- stringr::str_match(p, regex("^OT\\s*(\\d+)", ignore_case = TRUE))[, 2]
-  ot_num <- suppressWarnings(as.integer(ot_match))
-  idx_ot <- is.na(out) & !is.na(ot_num)
-  out[idx_ot] <- 2L + ot_num[idx_ot]
-
-  out
-}
-
-fit_scaler <- function(x) {
-  x <- as.numeric(x)
-  m <- mean(x, na.rm = TRUE)
-  s <- sd(x, na.rm = TRUE)
-  if (!is.finite(m)) m <- 0
-  if (!is.finite(s) || s <= 0) s <- NA_real_
-  list(center = m, scale = s)
-}
-
-apply_scaler <- function(x, scaler) {
-  x <- as.numeric(x)
-  if (is.null(scaler) || !is.finite(scaler$center) || !is.finite(scaler$scale) || scaler$scale <= 0) {
-    out <- rep(0, length(x))
-  } else {
-    out <- (x - scaler$center) / scaler$scale
-  }
-  out[!is.finite(out)] <- 0
-  out
-}
-
-weighted_mean_safe <- function(x, w) {
-  x <- as.numeric(x)
-  w <- as.numeric(w)
-  ok <- is.finite(x) & is.finite(w) & w > 0
-  if (!any(ok)) return(NA_real_)
-  sum(x[ok] * w[ok]) / sum(w[ok])
 }
 
 weighted_brier <- function(p, y, w) {
@@ -164,76 +97,15 @@ meta_out_path <- file.path(out_dir, "uconn_def_leaks_holdout_validation_meta.csv
 diag_out_path <- file.path(out_dir, "uconn_def_leaks_holdout_validation_fit_diagnostics.csv")
 
 # ---------- Load / preprocess ----------
-stints <- read_csv(
-  stints_path,
-  show_col_types = FALSE,
-  col_types = cols(
-    start_time = col_character(),
-    end_time = col_character()
-  )
+model_inputs <- load_common_lineup_model_inputs(
+  stints_path = stints_path,
+  games_path = games_path,
+  opp_path = opp_path,
+  add_global_game_id = TRUE
 )
-games <- read_csv(games_path, show_col_types = FALSE)
-if (!("site_type" %in% names(games))) games$site_type <- NA_character_
-
-games <- games %>% filter(!str_detect(game_file, "Exhibition"))
-stints <- stints %>% filter(!str_detect(game_file, "Exhibition"))
-
-stints <- stints %>%
-  mutate(
-    poss_est = as.numeric(poss_est),
-    points_against = as.numeric(points_against),
-    points_for = as.numeric(points_for),
-    net_pts = points_for - points_against
-  ) %>%
-  mutate(
-    poss_est = if_else(!is.na(poss_est) & poss_est > 0 & poss_est < 1, 1, poss_est)
-  )
-
-stints <- stints %>%
-  mutate(
-    period_num = parse_period_index(period),
-    start_clock_sec = ms_to_seconds(start_time),
-    end_clock_sec = ms_to_seconds(end_time),
-    dur_min = if_else(
-      !is.na(start_clock_sec) & !is.na(end_clock_sec),
-      abs(start_clock_sec - end_clock_sec) / 60,
-      NA_real_
-    ),
-    elapsed_game_sec = case_when(
-      is.na(period_num) | is.na(start_clock_sec) ~ NA_real_,
-      period_num <= 1 ~ pmax(0, 1200 - start_clock_sec),
-      period_num == 2 ~ 1200 + pmax(0, 1200 - start_clock_sec),
-      TRUE ~ 2400 + pmax(0, period_num - 3) * 300 + pmax(0, 300 - pmin(start_clock_sec, 300))
-    ),
-    .row_id_restore = row_number()
-  ) %>%
-  group_by(game_file) %>%
-  arrange(period_num, desc(start_clock_sec), stint_index, .by_group = TRUE) %>%
-  mutate(
-    score_margin_start = lag(cumsum(coalesce(net_pts, 0)), default = 0)
-  ) %>%
-  ungroup() %>%
-  arrange(.row_id_restore) %>%
-  select(-.row_id_restore)
-
-games <- games %>%
-  mutate(
-    game_date_parsed = suppressWarnings(mdy(game_date)),
-    game_date = format(game_date_parsed, "%m/%d/%y"),
-    opponent = str_trim(opponent),
-    site_home = if_else(uconn_is_home, 1.0, 0.0)
-  )
-
-opponent_controls <- read_csv(opp_path, show_col_types = FALSE) %>%
-  mutate(
-    game_date = format(mdy(game_date), "%m/%d/%y"),
-    opponent = str_trim(opponent)
-  )
-
-games2 <- games %>%
-  left_join(opponent_controls, by = c("game_date", "opponent")) %>%
-  arrange(game_date_parsed, game_file) %>%
-  mutate(global_game_id = row_number())
+stints <- model_inputs$stints
+games <- model_inputs$games
+games2 <- model_inputs$games_joined
 
 missing <- games2 %>%
   filter(is.na(opp_adjO)) %>%
@@ -253,10 +125,7 @@ stints2 <- stints %>%
     !is.na(elapsed_game_sec)
   ) %>%
   mutate(
-    uconn_lineup_canon = sapply(
-      str_split(uconn_lineup, "\\|"),
-      function(x) paste(sort(str_trim(x)), collapse = "|")
-    ),
+    uconn_lineup_canon = canonicalize_lineup(uconn_lineup),
     y_def = points_against / poss_est,
     w = poss_est
   ) %>%
