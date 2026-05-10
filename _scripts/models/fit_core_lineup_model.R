@@ -95,7 +95,7 @@ models_dir  <- if (dir.exists("_models")) "_models" else "."
 
 fit_path    <- file.path(models_dir, "uconn_lineup_gamelevel_offdef_fit.rds")
 
-# Thresholds come from env vars first, then the backtest output, then built-in defaults.
+# Tuned parameters come from env vars first, then backtest thresholds, then defaults.
 thresholds_path <- file.path("_outputs", "05_decision_audit", "uconn_lineup_decision_rule_v2_thresholds.csv")
 thresholds_tbl <- if (file.exists(thresholds_path)) {
   tryCatch(read_csv(thresholds_path, show_col_types = FALSE), error = function(e) NULL)
@@ -103,46 +103,64 @@ thresholds_tbl <- if (file.exists(thresholds_path)) {
   NULL
 }
 
-DECISION_RULE_PROB_POSSESSIONS <- {
-  env <- suppressWarnings(as.numeric(Sys.getenv("DECISION_RULE_PROB_POSSESSIONS", "")))
-  if (is.finite(env)) env else read_metric_value(thresholds_tbl, "DECISION_RULE_PROB_POSSESSIONS", 40)
+DECISION_V4_W_DEF <- {
+  env <- suppressWarnings(as.numeric(Sys.getenv("DECISION_V4_W_DEF", "")))
+  if (is.finite(env)) env else read_metric_value(thresholds_tbl, "W_DEF", 0.60)
 }
-DECISION_PLAY_MORE_PR_NET_MIN <- {
-  env <- suppressWarnings(as.numeric(Sys.getenv("DECISION_PLAY_MORE_PR_NET_MIN", "")))
-  if (is.finite(env)) env else read_metric_value(thresholds_tbl, "DECISION_PLAY_MORE_PR_NET_MIN", 0.553)
+DECISION_V4_W_OFF <- {
+  env <- suppressWarnings(as.numeric(Sys.getenv("DECISION_V4_W_OFF", "")))
+  if (is.finite(env)) env else read_metric_value(thresholds_tbl, "W_OFF", 0.25)
 }
-DECISION_PLAY_MORE_NET_PPP_MIN <- {
-  env <- suppressWarnings(as.numeric(Sys.getenv("DECISION_PLAY_MORE_NET_PPP_MIN", "")))
-  if (is.finite(env)) env else read_metric_value(thresholds_tbl, "DECISION_PLAY_MORE_NET_PPP_MIN", -0.015)
+DECISION_V4_W_STYLE <- {
+  env <- suppressWarnings(as.numeric(Sys.getenv("DECISION_V4_W_STYLE", "")))
+  if (is.finite(env)) env else read_metric_value(thresholds_tbl, "W_STYLE", 0.15)
 }
-DECISION_LEAN_IN_PR_NET_MIN <- {
-  env <- suppressWarnings(as.numeric(Sys.getenv("DECISION_LEAN_IN_PR_NET_MIN", "")))
-  if (is.finite(env)) env else read_metric_value(thresholds_tbl, "DECISION_LEAN_IN_PR_NET_MIN", 0.528)
+DECISION_V4_ALPHA_OPP <- {
+  env <- suppressWarnings(as.numeric(Sys.getenv("DECISION_V4_ALPHA_OPP", "")))
+  if (is.finite(env)) env else read_metric_value(thresholds_tbl, "ALPHA_OPP", 0.10)
 }
-DECISION_LEAN_IN_NET_PPP_MIN <- {
-  env <- suppressWarnings(as.numeric(Sys.getenv("DECISION_LEAN_IN_NET_PPP_MIN", "")))
-  if (is.finite(env)) env else read_metric_value(thresholds_tbl, "DECISION_LEAN_IN_NET_PPP_MIN", -0.015)
+DECISION_V4_DEF_FLOOR_QUANTILE <- {
+  env <- suppressWarnings(as.numeric(Sys.getenv("DECISION_V4_DEF_FLOOR_QUANTILE", "")))
+  if (is.finite(env)) env else read_metric_value(thresholds_tbl, "DEF_FLOOR_QUANTILE", 0.35)
 }
-DECISION_LIMIT_WATCH_PR_NET_MAX <- {
-  env <- suppressWarnings(as.numeric(Sys.getenv("DECISION_LIMIT_WATCH_PR_NET_MAX", "")))
-  if (is.finite(env)) env else read_metric_value(thresholds_tbl, "DECISION_LIMIT_WATCH_PR_NET_MAX", 0.657)
-}
-DECISION_LIMIT_WATCH_NET_PPP_MAX <- {
-  env <- suppressWarnings(as.numeric(Sys.getenv("DECISION_LIMIT_WATCH_NET_PPP_MAX", "")))
-  if (is.finite(env)) env else read_metric_value(thresholds_tbl, "DECISION_LIMIT_WATCH_NET_PPP_MAX", -0.06)
+DECISION_V4_DEF_FLOOR_T <- {
+  env <- suppressWarnings(as.numeric(Sys.getenv("DECISION_V4_DEF_FLOOR_T", "")))
+  if (is.finite(env)) env else read_metric_value(thresholds_tbl, "DEF_FLOOR_T", NA_real_)
 }
 
-# Load the backtest calibration model when it exists.
-calibration_model_path <- file.path("_outputs", "05_decision_audit", "uconn_pred_pr_net_pos_calibration_model.csv")
-calibration_model <- load_calibration_model(calibration_model_path)
+FLOOR_RIM_PLUS_THREE_SHARE <- 0.6190
+FLOOR_FTA_PER_FGA <- 0.2308
+CEILING_TOV_PER_FGA <- 0.2000
+CEILING_NON_RIM_PAINT_SHARE <- 0.2596
+
+weights_raw <- c(
+  w_def = as.numeric(DECISION_V4_W_DEF),
+  w_off = as.numeric(DECISION_V4_W_OFF),
+  w_style = as.numeric(DECISION_V4_W_STYLE)
+)
+weights_raw[!is.finite(weights_raw) | weights_raw < 0] <- 0
+if (sum(weights_raw) <= 0) {
+  weights_raw <- c(w_def = 0.60, w_off = 0.25, w_style = 0.15)
+}
+weights_norm <- weights_raw / sum(weights_raw)
+DECISION_V4_W_DEF <- weights_norm[["w_def"]]
+DECISION_V4_W_OFF <- weights_norm[["w_off"]]
+DECISION_V4_W_STYLE <- weights_norm[["w_style"]]
+if (!is.finite(DECISION_V4_ALPHA_OPP) || DECISION_V4_ALPHA_OPP < 0) DECISION_V4_ALPHA_OPP <- 0.10
+if (!is.finite(DECISION_V4_DEF_FLOOR_QUANTILE) ||
+    DECISION_V4_DEF_FLOOR_QUANTILE <= 0 ||
+    DECISION_V4_DEF_FLOOR_QUANTILE >= 1) {
+  DECISION_V4_DEF_FLOOR_QUANTILE <- 0.35
+}
 
 message(
-  "Decision rule v2 (core) | prob_possessions=", DECISION_RULE_PROB_POSSESSIONS,
-  " | PLAY MORE: pr_net>=", DECISION_PLAY_MORE_PR_NET_MIN, ", net_ppp>=", DECISION_PLAY_MORE_NET_PPP_MIN,
-  " | LEAN IN: pr_net>=", DECISION_LEAN_IN_PR_NET_MIN, ", net_ppp>=", DECISION_LEAN_IN_NET_PPP_MIN,
-  " | LIMIT/WATCH if pr_net<=", DECISION_LIMIT_WATCH_PR_NET_MAX, " or net_ppp<=", DECISION_LIMIT_WATCH_NET_PPP_MAX,
-  " | thresholds_file=", file.exists(thresholds_path),
-  " | calibration_mode=", if (!is.null(calibration_model)) calibration_model$mode else "fallback_shrink"
+  "Decision rule v4 (core) | w_def=", round(DECISION_V4_W_DEF, 3),
+  " | w_off=", round(DECISION_V4_W_OFF, 3),
+  " | w_style=", round(DECISION_V4_W_STYLE, 3),
+  " | alpha_opp=", round(DECISION_V4_ALPHA_OPP, 3),
+  " | def_floor_q=", round(DECISION_V4_DEF_FLOOR_QUANTILE, 3),
+  " | def_floor_t=", DECISION_V4_DEF_FLOOR_T,
+  " | thresholds_file=", file.exists(thresholds_path)
 )
 
 model_inputs <- load_common_lineup_model_inputs(
@@ -448,109 +466,465 @@ lineup_bayes <- tibble(
 
 write_csv(lineup_bayes, file.path(out_dir, "uconn_lineup_synergy_posterior.csv"))
 
-# Baseline-context full-net predictions for decision rule v2
-# Context convention matches rolling backtest training table:
-# z-scored game-state covariates = 0, opponent controls = 0, away_or_neutral baseline.
-intercept_draws <- as.numeric(post$intercept)
-alpha_net_draws <- post$alpha_net
-sigma_draws <- as.numeric(post$sigma)
-
-if (!is.numeric(intercept_draws) || length(intercept_draws) == 0) {
-  stop("Posterior 'intercept' draws missing/invalid.")
-}
-if (is.null(alpha_net_draws) || length(dim(alpha_net_draws)) < 2) {
-  stop("Posterior 'alpha_net' draws missing/invalid.")
-}
-if (!is.numeric(sigma_draws) || length(sigma_draws) == 0) {
-  stop("Posterior 'sigma' draws missing/invalid.")
-}
-if (length(intercept_draws) != nrow(alpha_net_draws) || length(sigma_draws) != nrow(alpha_net_draws)) {
-  stop("Posterior draw lengths do not align for intercept/alpha_net/sigma.")
+opp_component <- function(oppO_z, oppD_z) {
+  plogis(-0.6 * oppO_z + 0.2 * oppD_z)
 }
 
-lineup_decision_pred <- bind_rows(lapply(seq_along(lineups), function(lid) {
-  lineup_str <- lineups[[lid]]
-  pids <- unname(player_id[str_split(lineup_str, "\\|")[[1]]])
-  if (any(is.na(pids))) {
-    return(tibble(
-      lineup = lineup_str,
-      decision_pred_net_ppp_mean = NA_real_,
-      decision_pred_pr_net_pos = NA_real_
-    ))
+rescale01 <- function(x, default = 0.5) {
+  x <- as.numeric(x)
+  out <- rep(default, length(x))
+  ok <- is.finite(x)
+  if (!any(ok)) return(out)
+  lo <- min(x[ok], na.rm = TRUE)
+  hi <- max(x[ok], na.rm = TRUE)
+  if (!is.finite(lo) || !is.finite(hi) || hi <= lo) {
+    out[ok] <- default
+    return(out)
   }
+  out[ok] <- (x[ok] - lo) / (hi - lo)
+  out
+}
 
-  alpha_sum_draws <- rowSums(alpha_net_draws[, pids, drop = FALSE])
-  mu_draws <- intercept_draws + alpha_sum_draws + u_draws[, lid]
-  pred_sd_draws <- sigma_draws / sqrt(DECISION_RULE_PROB_POSSESSIONS)
-  ok_draws <- is.finite(mu_draws) & is.finite(pred_sd_draws) & pred_sd_draws > 0
-  pr_pos <- if (any(ok_draws)) {
-    mean(pnorm(mu_draws[ok_draws] / pred_sd_draws[ok_draws]), na.rm = TRUE)
-  } else {
-    NA_real_
-  }
+safe_quantile <- function(x, prob, default = NA_real_) {
+  x <- as.numeric(x)
+  x <- x[is.finite(x)]
+  if (length(x) == 0) return(default)
+  as.numeric(stats::quantile(x, probs = prob, na.rm = TRUE))
+}
 
-  tibble(
-    lineup = lineup_str,
-    decision_pred_net_ppp_mean = mean(mu_draws, na.rm = TRUE),
-    decision_pred_pr_net_pos = pr_pos
+archetype_path <- file.path("_data", "01_core_inputs", "player_archetypes.csv")
+arche_map <- load_player_archetypes(archetype_path, active_players = players)
+
+manual_events <- load_manual_defensive_events(
+  manual_root = file.path("_data", "03_manual_game_csv"),
+  games_joined = games2
+)
+if (nrow(manual_events) == 0) {
+  stop("No manual defensive events loaded from _data/03_manual_game_csv; V3 requires this source.")
+}
+
+pair_baseline <- weighted_mean_safe(manual_events$stop_event, rep(1, nrow(manual_events)))
+if (!is.finite(pair_baseline)) pair_baseline <- 0.5
+pair_tbl <- manual_events %>%
+  mutate(pair_key = lapply(defense_lineup_key, lineup_pair_keys_norm)) %>%
+  select(stop_event, pair_key) %>%
+  tidyr::unnest_longer(pair_key, values_to = "pair_key") %>%
+  filter(!is.na(pair_key), nzchar(pair_key)) %>%
+  group_by(pair_key) %>%
+  summarise(
+    events = n(),
+    stops = sum(stop_event, na.rm = TRUE),
+    pair_survive = (stops + 80 * pair_baseline) / (events + 80),
+    .groups = "drop"
   )
-}))
 
-lineup_decision_pred <- lineup_decision_pred %>%
+pair_split <- stringr::str_split_fixed(pair_tbl$pair_key, "\\|", 2)
+pair_ranking <- pair_tbl %>%
   mutate(
-    decision_pred_pr_net_pos_raw = decision_pred_pr_net_pos,
-    decision_pred_pr_net_pos = apply_decision_calibration(
-      p_raw = decision_pred_pr_net_pos_raw,
-      calib_model = calibration_model,
-      fallback_shrink = 0.85
+    player_1 = pair_split[, 1],
+    player_2 = pair_split[, 2],
+    raw_stop_rate = if_else(events > 0, stops / events, NA_real_),
+    pair_survive = pmin(pmax(pair_survive, 0), 1),
+    pair_survive_above_baseline = pair_survive - pair_baseline,
+    sample_tier = case_when(
+      events >= 200 ~ "HIGH",
+      events >= 80 ~ "MEDIUM",
+      events >= 30 ~ "LOW",
+      TRUE ~ "VERY_LOW"
     )
+  ) %>%
+  arrange(desc(pair_survive), desc(events), pair_key) %>%
+  mutate(
+    rank_best_to_worst = row_number(),
+    rank_worst_to_best = min_rank(pair_survive)
+  ) %>%
+  select(
+    rank_best_to_worst,
+    rank_worst_to_best,
+    player_1,
+    player_2,
+    pair_key,
+    events,
+    stops,
+    raw_stop_rate,
+    pair_survive,
+    pair_survive_above_baseline,
+    sample_tier
   )
 
-# Older runs exported a calibrated synergy column. Decision rule v2 uses the
-# net-based posterior predictions instead, so that column is no longer written.
+write_csv(pair_ranking, file.path(out_dir, "uconn_defensive_two_man_pairs.csv"))
+
+team_def_ppp <- sum(stints2$points_against, na.rm = TRUE) / sum(stints2$poss_est, na.rm = TRUE)
+stints_trio <- stints2 %>%
+  mutate(
+    trio_stop = as.numeric((points_against / poss_est) <= team_def_ppp),
+    trio_key = lapply(uconn_lineup_canon, lineup_trio_keys),
+    event_w = poss_est,
+    stop_w = trio_stop * poss_est
+  )
+trio_baseline <- weighted_mean_safe(stints_trio$trio_stop, stints_trio$event_w)
+if (!is.finite(trio_baseline)) trio_baseline <- 0.5
+trio_tbl <- stints_trio %>%
+  select(trio_key, event_w, stop_w) %>%
+  tidyr::unnest_longer(trio_key, values_to = "trio_key") %>%
+  filter(!is.na(trio_key), nzchar(trio_key)) %>%
+  group_by(trio_key) %>%
+  summarise(
+    events = sum(event_w, na.rm = TRUE),
+    stops = sum(stop_w, na.rm = TRUE),
+    trio_survive = (stops + 120 * trio_baseline) / (events + 120),
+    .groups = "drop"
+  )
+
+leak_candidates <- c(
+  file.path("_outputs", "02_defense_leaks", "uconn_lineup_def_leaks_posterior.csv"),
+  file.path("_outputs", "uconn_lineup_def_leaks_posterior.csv"),
+  file.path("_outputs", "01_lineup_core", "uconn_lineup_def_leaks_posterior.csv")
+)
+leak_path <- leak_candidates[file.exists(leak_candidates)][1]
+if (length(leak_path) == 0 || !nzchar(leak_path)) {
+  stop("Missing required defensive leak posterior for V3 scoring.")
+}
+leak_tbl <- read_csv(leak_path, show_col_types = FALSE)
+if (!("lineup" %in% names(leak_tbl)) && ("lineup_key" %in% names(leak_tbl))) {
+  leak_tbl <- leak_tbl %>% rename(lineup = lineup_key)
+}
+if (!all(c("lineup", "pr_leak") %in% names(leak_tbl))) {
+  stop("Defensive leak posterior missing lineup/pr_leak columns.")
+}
+leak_map <- leak_tbl %>%
+  mutate(lineup = canonicalize_lineup(lineup), pr_leak = as.numeric(pr_leak)) %>%
+  select(lineup, pr_leak) %>%
+  distinct(lineup, .keep_all = TRUE) %>%
+  tibble::deframe()
+
+shot_candidates <- c(
+  file.path("_outputs", "01_lineup_core", "uconn_lineup_shot_diet.csv"),
+  file.path("_outputs", "uconn_lineup_shot_diet.csv")
+)
+shot_path <- shot_candidates[file.exists(shot_candidates)][1]
+if (length(shot_path) == 0 || !nzchar(shot_path)) {
+  stop("Missing required lineup shot diet profile for V4 scoring.")
+}
+shot_tbl <- read_csv(shot_path, show_col_types = FALSE)
+if (!("lineup_key_norm" %in% names(shot_tbl))) {
+  if (!("lineup_pretty" %in% names(shot_tbl))) {
+    stop("Shot diet profile requires lineup_pretty or lineup_key_norm.", call. = FALSE)
+  }
+  shot_tbl <- shot_tbl %>%
+    mutate(lineup_key_norm = canonicalize_lineup_norm(lineup_pretty))
+}
+shot_tbl <- shot_tbl %>%
+  mutate(
+    lineup_key_norm = canonicalize_lineup_norm(lineup_key_norm),
+    fga = as.numeric(fga),
+    rim_share = as.numeric(rim_share),
+    paint_share = as.numeric(paint_share),
+    corner_3_share = as.numeric(corner_3_share),
+    above_break_3_share = as.numeric(above_break_3_share),
+    fta_per_fga = as.numeric(fta_per_fga),
+    tov_per_fga = as.numeric(tov_per_fga),
+    rim_plus_three_share = as.numeric(if ("rim_plus_three_share" %in% names(shot_tbl)) rim_plus_three_share else NA_real_),
+    non_rim_paint_share = as.numeric(if ("non_rim_paint_share" %in% names(shot_tbl)) non_rim_paint_share else NA_real_)
+  ) %>%
+  mutate(
+    rim_plus_three_share = if_else(
+      is.finite(rim_plus_three_share),
+      rim_plus_three_share,
+      coalesce(rim_share, 0) + coalesce(corner_3_share, 0) + coalesce(above_break_3_share, 0)
+    ),
+    non_rim_paint_share = if_else(
+      is.finite(non_rim_paint_share),
+      non_rim_paint_share,
+      coalesce(paint_share, 0) - coalesce(rim_share, 0)
+    )
+  ) %>%
+  filter(!is.na(lineup_key_norm), nzchar(lineup_key_norm)) %>%
+  group_by(lineup_key_norm) %>%
+  summarise(
+    lineup_pretty_shot = dplyr::first(lineup_pretty),
+    shot_fga = sum(fga, na.rm = TRUE),
+    rim_plus_three_share = weighted_mean_safe(rim_plus_three_share, pmax(fga, 1)),
+    non_rim_paint_share = weighted_mean_safe(non_rim_paint_share, pmax(fga, 1)),
+    fta_per_fga_lineup = weighted_mean_safe(fta_per_fga, pmax(fga, 1)),
+    tov_per_fga_lineup = weighted_mean_safe(tov_per_fga, pmax(fga, 1)),
+    shot_sample_flag = if_else(any(tolower(coalesce(sample_flag, "")) == "ok"), "ok", "small_sample"),
+    .groups = "drop"
+  )
+
+if (nrow(shot_tbl) == 0) {
+  stop("Shot diet profile has no usable lineup rows after normalization.", call. = FALSE)
+}
+
+player_creation_candidates <- c(
+  file.path("_outputs", "03_players", "uconn_player_creation_profile.csv"),
+  file.path("_outputs", "uconn_player_creation_profile.csv")
+)
+player_creation_path <- player_creation_candidates[file.exists(player_creation_candidates)][1]
+if (length(player_creation_path) == 0 || !nzchar(player_creation_path)) {
+  stop("Missing required player creation profile for V4 scoring.")
+}
+player_creation_tbl <- read_csv(player_creation_path, show_col_types = FALSE)
+if (!("player_key_norm" %in% names(player_creation_tbl))) {
+  if (!("player" %in% names(player_creation_tbl))) {
+    stop("Player creation profile requires player or player_key_norm.", call. = FALSE)
+  }
+  player_creation_tbl <- player_creation_tbl %>%
+    mutate(player_key_norm = normalize_player_key(player))
+}
+if (!("created_scoring_actions" %in% names(player_creation_tbl))) {
+  stop("Player creation profile missing created_scoring_actions.", call. = FALSE)
+}
+if (!("ast_to_tov" %in% names(player_creation_tbl))) player_creation_tbl$ast_to_tov <- NA_real_
+if (!("self_created_make_rate" %in% names(player_creation_tbl))) player_creation_tbl$self_created_make_rate <- NA_real_
+if (!("tracked_event_rows" %in% names(player_creation_tbl))) player_creation_tbl$tracked_event_rows <- 1
+
+player_creation_tbl <- player_creation_tbl %>%
+  mutate(
+    player_key_norm = normalize_player_key(player_key_norm),
+    created_scoring_actions = as.numeric(created_scoring_actions),
+    ast_to_tov = as.numeric(ast_to_tov),
+    self_created_make_rate = as.numeric(self_created_make_rate),
+    tracked_event_rows = as.numeric(tracked_event_rows)
+  ) %>%
+  filter(!is.na(player_key_norm), nzchar(player_key_norm)) %>%
+  group_by(player_key_norm) %>%
+  summarise(
+    created_scoring_actions = weighted_mean_safe(created_scoring_actions, pmax(tracked_event_rows, 1)),
+    ast_to_tov = weighted_mean_safe(ast_to_tov, pmax(tracked_event_rows, 1)),
+    self_created_make_rate = weighted_mean_safe(self_created_make_rate, pmax(tracked_event_rows, 1)),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    creation_raw = 0.60 * zscore_safe(created_scoring_actions) +
+      0.25 * zscore_safe(ast_to_tov) +
+      0.15 * zscore_safe(self_created_make_rate),
+    creation_score_player = rescale01(creation_raw, default = 0.5)
+  )
+player_creation_map <- setNames(player_creation_tbl$creation_score_player, player_creation_tbl$player_key_norm)
+
+lineup_features <- lineup_usage %>%
+  transmute(
+    lineup = uconn_lineup_canon,
+    lineup_key_norm = canonicalize_lineup_norm(uconn_lineup_canon),
+    prior_5man_possessions = possessions
+  )
+
+lineup_features <- lineup_features %>%
+  rowwise() %>%
+  mutate(
+    pair_keys = list(lineup_pair_keys_norm(lineup)),
+    trio_keys = list(lineup_trio_keys(lineup)),
+    pair_survive = {
+      pk <- pair_keys[[1]]
+      if (length(pk) == 0) pair_baseline else {
+        m <- match(pk, pair_tbl$pair_key)
+        v <- pair_tbl$pair_survive[m]
+        ev <- pair_tbl$events[m]
+        v[!is.finite(v)] <- pair_baseline
+        ev[!is.finite(ev)] <- 0
+        if (sum(ev, na.rm = TRUE) > 0) weighted_mean_safe(v, ev) else mean(v, na.rm = TRUE)
+      }
+    },
+    prior_pair_events = {
+      pk <- pair_keys[[1]]
+      if (length(pk) == 0) 0 else {
+        m <- match(pk, pair_tbl$pair_key)
+        ev <- pair_tbl$events[m]
+        ev[!is.finite(ev)] <- 0
+        sum(ev, na.rm = TRUE)
+      }
+    },
+    trio_survive = {
+      tk <- trio_keys[[1]]
+      if (length(tk) == 0) trio_baseline else {
+        m <- match(tk, trio_tbl$trio_key)
+        v <- trio_tbl$trio_survive[m]
+        ev <- trio_tbl$events[m]
+        v[!is.finite(v)] <- trio_baseline
+        ev[!is.finite(ev)] <- 0
+        if (sum(ev, na.rm = TRUE) > 0) weighted_mean_safe(v, ev) else mean(v, na.rm = TRUE)
+      }
+    },
+    prior_trio_possessions = {
+      tk <- trio_keys[[1]]
+      if (length(tk) == 0) 0 else {
+        m <- match(tk, trio_tbl$trio_key)
+        ev <- trio_tbl$events[m]
+        ev[!is.finite(ev)] <- 0
+        sum(ev, na.rm = TRUE)
+      }
+    },
+    pr_leak = {
+      p <- unname(leak_map[lineup])[[1]]
+      if (!is.finite(p)) 0.5 else p
+    },
+    archetype_balance = compute_lineup_archetype_balance(lineup, arche_map),
+    creation_score = {
+      toks <- split_lineup_players_norm(lineup)
+      vals <- as.numeric(player_creation_map[toks])
+      if (length(vals) == 0 || all(!is.finite(vals))) 0.5 else mean(vals[is.finite(vals)], na.rm = TRUE)
+    }
+  ) %>%
+  ungroup() %>%
+  select(-pair_keys, -trio_keys) %>%
+  left_join(shot_tbl, by = "lineup_key_norm")
+
+shot_default_rim_plus_three <- safe_quantile(shot_tbl$rim_plus_three_share, 0.50, default = FLOOR_RIM_PLUS_THREE_SHARE)
+shot_default_non_rim_paint <- safe_quantile(shot_tbl$non_rim_paint_share, 0.50, default = CEILING_NON_RIM_PAINT_SHARE)
+shot_default_fta <- safe_quantile(shot_tbl$fta_per_fga_lineup, 0.50, default = FLOOR_FTA_PER_FGA)
+shot_default_tov <- safe_quantile(shot_tbl$tov_per_fga_lineup, 0.50, default = CEILING_TOV_PER_FGA)
+
+lineup_features <- lineup_features %>%
+  mutate(
+    rim_plus_three_share = if_else(is.finite(rim_plus_three_share), rim_plus_three_share, shot_default_rim_plus_three),
+    non_rim_paint_share = if_else(is.finite(non_rim_paint_share), non_rim_paint_share, shot_default_non_rim_paint),
+    fta_per_fga_lineup = if_else(is.finite(fta_per_fga_lineup), fta_per_fga_lineup, shot_default_fta),
+    tov_per_fga_lineup = if_else(is.finite(tov_per_fga_lineup), tov_per_fga_lineup, shot_default_tov),
+    p1 = pmax(0, FLOOR_RIM_PLUS_THREE_SHARE - rim_plus_three_share) / FLOOR_RIM_PLUS_THREE_SHARE,
+    p2 = pmax(0, FLOOR_FTA_PER_FGA - fta_per_fga_lineup) / FLOOR_FTA_PER_FGA,
+    p3 = pmax(0, tov_per_fga_lineup - CEILING_TOV_PER_FGA) / CEILING_TOV_PER_FGA,
+    p4 = pmax(0, non_rim_paint_share - CEILING_NON_RIM_PAINT_SHARE) / CEILING_NON_RIM_PAINT_SHARE,
+    shot_diet_score = pmin(pmax(1 - (0.35 * p1 + 0.20 * p2 + 0.25 * p3 + 0.20 * p4), 0), 1),
+    defense_score_neutral = 0.55 * (1 - pr_leak) + 0.30 * pair_survive + 0.10 * trio_survive + 0.05 * archetype_balance,
+    defense_score_neutral = pmin(pmax(defense_score_neutral, 0), 1),
+    defense_score_context = 0.9 * defense_score_neutral + 0.1 * opp_component(0, 0),
+    defense_score = (1 - DECISION_V4_ALPHA_OPP) * defense_score_neutral + DECISION_V4_ALPHA_OPP * defense_score_context,
+    defense_score = pmin(pmax(defense_score, 0), 1),
+    decision_survive_base = defense_score_neutral,
+    decision_survive_score_raw = defense_score
+  )
+
+def_floor_t <- DECISION_V4_DEF_FLOOR_T
+if (!is.finite(def_floor_t)) {
+  def_floor_t <- safe_quantile(
+    lineup_features$defense_score,
+    DECISION_V4_DEF_FLOOR_QUANTILE,
+    default = 0.50
+  )
+}
+if (!is.finite(def_floor_t)) {
+  stop("Invalid V4 defense floor threshold.", call. = FALSE)
+}
+
+grid_vals <- c(-0.5, 0, 0.5)
+fragile <- rep(FALSE, nrow(lineup_features))
+robust <- lineup_features$defense_score
+
+for (i in seq_len(nrow(lineup_features))) {
+  pert_scores <- c()
+  for (do in grid_vals) {
+    for (dd in grid_vals) {
+      s_context <- 0.9 * lineup_features$defense_score_neutral[[i]] + 0.1 * opp_component(do, dd)
+      s <- (1 - DECISION_V4_ALPHA_OPP) * lineup_features$defense_score_neutral[[i]] + DECISION_V4_ALPHA_OPP * s_context
+      s <- min(max(s, 0), 1)
+      pert_scores <- c(pert_scores, s)
+    }
+  }
+  base_pass <- is.finite(lineup_features$defense_score[[i]]) && lineup_features$defense_score[[i]] >= def_floor_t
+  pert_pass <- pert_scores >= def_floor_t
+  if (length(pert_pass) > 0 && any(pert_pass != base_pass)) {
+    fragile[[i]] <- TRUE
+  }
+  robust[[i]] <- min(c(lineup_features$defense_score[[i]], pert_scores), na.rm = TRUE)
+}
+
+lineup_features <- lineup_features %>%
+  mutate(
+    opp_fragile_flag = fragile,
+    defense_score_robust = pmin(pmax(robust, 0), 1),
+    decision_survive_score_robust = defense_score_robust,
+    decision_def_ppp_pred = team_def_ppp + (0.5 - defense_score_robust) * 0.30
+  )
+
 coach_view <- lineup_bayes %>%
-  left_join(lineup_decision_pred, by = "lineup") %>%
+  left_join(lineup_features, by = c("lineup" = "lineup")) %>%
   left_join(
-    lineup_usage %>% select(lineup_id, possessions, minutes, raw_net_ppp, games, segments),
-    by = "lineup_id"
+    lineup_usage %>% select(lineup_id, lineup_pretty, possessions, minutes, raw_net_ppp, games),
+    by = c("lineup_id", "lineup_pretty")
   ) %>%
   mutate(
     expected_points_per_40 = round(synergy_mean * 40 * PACE_UCONN, 1),
-
+    offense_upside_raw = 0.60 * zscore_safe(expected_points_per_40) +
+      0.25 * zscore_safe(creation_score) +
+      0.15 * zscore_safe(fta_per_fga_lineup),
+    offense_upside_score = rescale01(offense_upside_raw, default = 0.5),
+    composite_score = DECISION_V4_W_DEF * defense_score_robust +
+      DECISION_V4_W_OFF * offense_upside_score +
+      DECISION_V4_W_STYLE * shot_diet_score,
+    composite_score = pmin(pmax(composite_score, 0), 1),
+    is_unseen = !is.finite(prior_5man_possessions) |
+      !is.finite(prior_pair_events) |
+      !is.finite(prior_trio_possessions) |
+      (prior_5man_possessions == 0 & prior_pair_events < 20),
+    is_low_sample = !is_unseen & (
+      prior_5man_possessions < 30 |
+        prior_pair_events < 80 |
+        prior_trio_possessions < 40
+    ),
+    defense_floor_pass = !is_unseen & !is_low_sample & is.finite(defense_score_robust) & defense_score_robust >= def_floor_t,
+    sample_flag = case_when(
+      is_unseen ~ "unseen",
+      is_low_sample ~ "low_sample",
+      tolower(coalesce(shot_sample_flag, "")) == "ok" ~ "ok",
+      TRUE ~ "small_sample"
+    ),
     minutes = round(minutes, 1),
     possessions = round(possessions, 0),
     raw_net_ppp = round(raw_net_ppp, 3),
-
     synergy_mean = round(synergy_mean, 3),
     synergy_p05 = round(synergy_p05, 3),
     synergy_p95 = round(synergy_p95, 3),
-    decision_pred_pr_net_pos_raw = round(decision_pred_pr_net_pos_raw, 3),
-    decision_pred_net_ppp_mean = round(decision_pred_net_ppp_mean, 3),
-    decision_pred_pr_net_pos = round(decision_pred_pr_net_pos, 3),
-    decision_prob = decision_pred_pr_net_pos,
+    defense_score = round(defense_score_robust, 3),
+    decision_survive_score_raw = round(defense_score, 3),
+    decision_survive_score_robust = round(defense_score, 3),
+    offense_upside_score = round(offense_upside_score, 3),
+    shot_diet_score = round(shot_diet_score, 3),
+    creation_score = round(creation_score, 3),
+    composite_score = round(composite_score, 3),
+    decision_def_ppp_pred = round(decision_def_ppp_pred, 3),
+    prior_pair_events = round(prior_pair_events, 1),
+    prior_trio_possessions = round(prior_trio_possessions, 1),
+    opp_fragile_flag = as.logical(opp_fragile_flag)
+  )
 
-    Decision = case_when(
-      possessions >= 70 &
-        decision_pred_pr_net_pos >= DECISION_PLAY_MORE_PR_NET_MIN &
-        decision_pred_net_ppp_mean >= DECISION_PLAY_MORE_NET_PPP_MIN ~ "PLAY MORE",
-      possessions >= 45  &
-        decision_pred_pr_net_pos >= DECISION_LEAN_IN_PR_NET_MIN &
-        decision_pred_net_ppp_mean >= DECISION_LEAN_IN_NET_PPP_MIN ~ "LEAN IN",
-      possessions >= 30  &
-        (
-          decision_pred_pr_net_pos <= DECISION_LIMIT_WATCH_PR_NET_MAX |
-          decision_pred_net_ppp_mean <= DECISION_LIMIT_WATCH_NET_PPP_MAX
-        ) ~ "LIMIT / WATCH",
-      possessions <  30                           ~ "TOO SMALL",
-      TRUE                                       ~ "NEUTRAL"
-    )
+upside_df <- coach_view %>% filter(defense_floor_pass, is.finite(composite_score))
+up_q_low <- safe_quantile(upside_df$composite_score, 1 / 3, default = NA_real_)
+up_q_high <- safe_quantile(upside_df$composite_score, 2 / 3, default = NA_real_)
+if (!is.finite(up_q_low) || !is.finite(up_q_high) || up_q_high < up_q_low) {
+  up_q_low <- 0.33
+  up_q_high <- 0.66
+}
+
+coach_view <- coach_view %>%
+  mutate(
+    decision_label = case_when(
+      is_unseen ~ "UNSEEN",
+      is_low_sample ~ "LOW_SAMPLE",
+      !defense_floor_pass ~ "DEF_FLOOR_FAIL",
+      composite_score >= up_q_high ~ "DEF_FLOOR_PASS_UPSIDE_HIGH",
+      composite_score < up_q_low ~ "DEF_FLOOR_PASS_UPSIDE_LOW",
+      TRUE ~ "DEF_FLOOR_PASS_UPSIDE_MED"
+    ),
+    Decision = decision_label
   ) %>%
   arrange(
-    factor(Decision, levels = c("PLAY MORE","LEAN IN","NEUTRAL","LIMIT / WATCH","TOO SMALL")),
+    factor(
+      decision_label,
+      levels = c(
+        "DEF_FLOOR_PASS_UPSIDE_HIGH",
+        "DEF_FLOOR_PASS_UPSIDE_MED",
+        "DEF_FLOOR_PASS_UPSIDE_LOW",
+        "DEF_FLOOR_FAIL",
+        "LOW_SAMPLE",
+        "UNSEEN"
+      )
+    ),
     desc(possessions)
   ) %>%
   select(
     lineup_pretty,
+    lineup_key_norm,
     possessions,
     minutes,
     games,
@@ -558,15 +932,46 @@ coach_view <- lineup_bayes %>%
     synergy_mean,
     synergy_p05,
     synergy_p95,
-    decision_pred_pr_net_pos_raw,
-    decision_pred_net_ppp_mean,
-    decision_pred_pr_net_pos,
-    decision_prob,
+    decision_survive_score_raw,
+    decision_survive_score_robust,
+    defense_score,
+    offense_upside_score,
+    shot_diet_score,
+    creation_score,
+    composite_score,
+    decision_def_ppp_pred,
+    prior_pair_events,
+    prior_trio_possessions,
+    opp_fragile_flag,
     expected_points_per_40,
+    defense_floor_pass,
+    sample_flag,
+    decision_label,
     Decision
   )
 
 write_csv(coach_view, file.path(out_dir, "uconn_lineup_coach_view.csv"))
+write_csv(
+  coach_view %>%
+    select(
+      lineup_pretty,
+      lineup_key_norm,
+      decision_label,
+      defense_floor_pass,
+      defense_score,
+      offense_upside_score,
+      shot_diet_score,
+      creation_score,
+      composite_score,
+      decision_def_ppp_pred,
+      opp_fragile_flag,
+      sample_flag,
+      possessions,
+      minutes,
+      games
+    ),
+  file.path(out_dir, "uconn_lineup_decision_board.csv")
+)
 
 message("Done. Wrote to: ", normalizePath(out_dir))
 message("Model cache: ", normalizePath(fit_path))

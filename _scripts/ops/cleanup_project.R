@@ -18,6 +18,17 @@ suppressPackageStartupMessages({
 })
 
 source("_scripts/utils/output_cleanup.R")
+source("_scripts/utils/core_input_repair.R")
+
+as_bool_env <- function(name, default = FALSE) {
+  val <- Sys.getenv(name, if (default) "true" else "false")
+  tolower(trimws(val)) %in% c("1", "true", "t", "yes", "y")
+}
+
+as_num_env <- function(name, default = NA_real_) {
+  x <- suppressWarnings(as.numeric(Sys.getenv(name, as.character(default))))
+  if (!is.finite(x)) default else x
+}
 
 
 cat("=== Project Cleanup ===\n")
@@ -52,7 +63,32 @@ if (dup_orphaned > 0) {
   )
 }
 
-# 3) Check game metadata consistency: opponent should appear in matchup_header.
+# 3) Repair core stints input with deterministic rules (enabled by default).
+repair_core_inputs <- as_bool_env("REPAIR_CORE_INPUTS", default = TRUE)
+repair_core_inputs_dry_run <- as_bool_env("REPAIR_CORE_INPUTS_DRY_RUN", default = FALSE)
+repair_core_inputs_backup <- as_bool_env("REPAIR_CORE_INPUTS_BACKUP", default = TRUE)
+
+if (!repair_core_inputs) {
+  cat("Core stints repair: skipped (REPAIR_CORE_INPUTS=false)\n")
+} else {
+  repair_res <- repair_uconn_stints_core_input(
+    rewrite = !repair_core_inputs_dry_run,
+    backup = !repair_core_inputs_dry_run && repair_core_inputs_backup
+  )
+
+  cat(sprintf(
+    "Core stints repair: changed %d/%d row(s); mode=%s\n",
+    repair_res$changed_rows,
+    repair_res$total_rows,
+    if (repair_res$rewrite) "rewrite" else "dry-run"
+  ))
+  cat(sprintf("Core stints repair report: %s\n", repair_res$report_path))
+  if (!is.na(repair_res$backup_path) && nzchar(repair_res$backup_path)) {
+    cat(sprintf("Core stints backup: %s\n", repair_res$backup_path))
+  }
+}
+
+# 4) Check game metadata consistency: opponent should appear in matchup_header.
 games_path <- "_data/01_core_inputs/uconn_games_meta.csv"
 if (!file.exists(games_path)) {
   cat("uconn_games_meta.csv not found; skipped metadata check.\n")
@@ -77,7 +113,7 @@ if (!file.exists(games_path)) {
   }
 }
 
-# 4) Report local environment folders if present.
+# 5) Report local environment folders if present.
 env_dirs <- c(".tmp_pdfenv", ".venv", ".venv_pdf")
 present_env <- env_dirs[dir.exists(env_dirs)]
 if (length(present_env) > 0) {
@@ -85,6 +121,37 @@ if (length(present_env) > 0) {
   cat("Tip: remove unused env dirs to save space.\n")
 } else {
   cat("Local env dirs present: none\n")
+}
+
+# 6) Prune old pipeline run logs.
+log_dir <- file.path("_outputs", "_run_logs")
+prune_logs <- as_bool_env("PRUNE_RUN_LOGS", default = TRUE)
+keep_recent <- suppressWarnings(as.integer(as_num_env("RUN_LOGS_KEEP_RECENT", default = 20)))
+if (!is.finite(keep_recent) || keep_recent < 0) keep_recent <- 20L
+max_age_days <- as_num_env("RUN_LOGS_MAX_AGE_DAYS", default = NA_real_)
+
+if (!prune_logs) {
+  cat("Run log pruning: skipped (PRUNE_RUN_LOGS=false)\n")
+} else if (!dir.exists(log_dir)) {
+  cat("Run log pruning: skipped (_outputs/_run_logs not found)\n")
+} else {
+  before_n <- length(list.files(log_dir, full.names = TRUE))
+  prune_res <- prune_run_logs(
+    log_dir = log_dir,
+    keep_recent = keep_recent,
+    max_age_days = max_age_days
+  )
+  removed_n <- sum(prune_res$removed, na.rm = TRUE)
+  after_n <- length(list.files(log_dir, full.names = TRUE))
+
+  cat(sprintf(
+    "Run log pruning: removed %d file(s); before=%d after=%d; keep_recent=%d",
+    removed_n, before_n, after_n, as.integer(keep_recent)
+  ))
+  if (is.finite(max_age_days) && max_age_days > 0) {
+    cat(sprintf("; max_age_days=%.0f", max_age_days))
+  }
+  cat("\n")
 }
 
 cat("=== Cleanup Complete ===\n")

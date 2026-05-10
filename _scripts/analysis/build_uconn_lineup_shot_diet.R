@@ -18,6 +18,7 @@ suppressPackageStartupMessages({
 })
 
 source("_scripts/utils/manual_game_data.R")
+source("_scripts/utils/lineup_model_utils.R")
 
 args <- commandArgs(trailingOnly = TRUE)
 
@@ -68,12 +69,13 @@ uconn_off <- manual_games %>%
   ) %>%
   mutate(
     lineup_pretty = offense_lineup_key,
-    lineup_players_n = str_count(lineup_pretty, fixed(" | ")) + 1L,
+    lineup_key_norm = canonicalize_lineup_norm(offense_lineup_key),
+    lineup_players_n = str_count(offense_lineup_key, fixed("|")) + 1L,
     assisted_make = FGA == 1 & FGM == 1 & !is.na(AssistPlayer) & AssistPlayer != "",
     self_created_make = FGA == 1 & FGM == 1 & (is.na(AssistPlayer) | AssistPlayer == ""),
     live_ball_turnover = TOV == 1 & !is.na(StealPlayer) & StealPlayer != ""
   ) %>%
-  filter(lineup_players_n == 5)
+  filter(lineup_players_n == 5, !is.na(lineup_key_norm), nzchar(lineup_key_norm))
 
 if (nrow(uconn_off) == 0) {
   stop("No five-player UConn offense lineup rows found in manual-game CSVs.", call. = FALSE)
@@ -86,8 +88,9 @@ team_totals <- uconn_off %>%
   )
 
 lineup_profile <- uconn_off %>%
-  group_by(lineup_pretty) %>%
+  group_by(lineup_key_norm) %>%
   summarise(
+    lineup_pretty = sort(unique(lineup_pretty))[1],
     games = n_distinct(game_file),
     opponents = n_distinct(opponent),
     tracked_event_rows = n(),
@@ -117,10 +120,46 @@ lineup_profile <- uconn_off %>%
     .groups = "drop"
   ) %>%
   mutate(
+    rim_plus_three_share = rim_share + corner_3_share + above_break_3_share,
+    non_rim_paint_share = paint_share - rim_share,
     uconn_fga_share = pct(fga, team_totals$team_fga[[1]]),
     uconn_points_share = pct(points, team_totals$team_points[[1]])
   ) %>%
-  arrange(desc(points), desc(fga), lineup_pretty)
+  arrange(desc(points), desc(fga), lineup_pretty) %>%
+  select(
+    lineup_pretty,
+    lineup_key_norm,
+    games,
+    opponents,
+    tracked_event_rows,
+    fga,
+    fgm,
+    fg_pct,
+    fta,
+    ftm,
+    points,
+    turnovers,
+    live_ball_turnovers,
+    assisted_makes,
+    self_created_makes,
+    assisted_make_rate,
+    self_created_make_rate,
+    rim_fga,
+    paint_fga,
+    corner_3_fga,
+    above_break_3_fga,
+    rim_share,
+    paint_share,
+    corner_3_share,
+    above_break_3_share,
+    rim_plus_three_share,
+    non_rim_paint_share,
+    fta_per_fga,
+    tov_per_fga,
+    uconn_fga_share,
+    uconn_points_share,
+    sample_flag
+  )
 
 stable_lineup_profile <- lineup_profile %>%
   filter(

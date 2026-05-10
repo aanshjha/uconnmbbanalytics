@@ -10,7 +10,7 @@ bootstrap_project(.local_script_path)
 rm(.local_script_path)
 
 # Probability reliability diagnostics for lineup holdout predictions.
-# Uses rolling holdout rows and evaluates pred_pr_net_pos vs observed_net_positive.
+# Uses rolling holdout rows and evaluates V3 survive score vs observed_survive4.
 
 suppressPackageStartupMessages({
   library(dplyr)
@@ -71,7 +71,7 @@ rows <- read_csv(rows_path, show_col_types = FALSE)
 required_cols <- c(
   "holdout_game_id",
   "holdout_game_file",
-  "observed_net_positive",
+  "observed_survive4",
   "holdout_possessions"
 )
 missing_cols <- setdiff(required_cols, names(rows))
@@ -79,19 +79,21 @@ if (length(missing_cols) > 0) {
   stop("Missing required columns: ", paste(missing_cols, collapse = ", "))
 }
 
-prob_col <- if ("pred_pr_net_pos_for_decision" %in% names(rows)) {
-  "pred_pr_net_pos_for_decision"
+prob_col <- if ("decision_survive_score_robust" %in% names(rows)) {
+  "decision_survive_score_robust"
+} else if ("decision_survive_score_raw" %in% names(rows)) {
+  "decision_survive_score_raw"
 } else {
-  "pred_pr_net_pos"
+  "pred_pr_net_pos_for_decision"
 }
 if (!(prob_col %in% names(rows))) {
-  stop("Missing required probability column. Expected `pred_pr_net_pos_for_decision` or `pred_pr_net_pos`.")
+  stop("Missing required probability column. Expected `decision_survive_score_robust` or `decision_survive_score_raw`.")
 }
 
 rows2 <- rows %>%
   mutate(
     pred_pr_net_pos = as.numeric(.data[[prob_col]]),
-    observed_net_positive_num = coerce_bool_num(observed_net_positive),
+    observed_net_positive_num = as.numeric(observed_survive4),
     holdout_possessions = as.numeric(holdout_possessions)
   )
 
@@ -163,7 +165,7 @@ metrics <- tibble(
   value = c(
     basename(rows_path),
     prob_col,
-    "observed_net_positive",
+    "observed_survive4",
     as.character(n_total_rows),
     as.character(nrow(dat)),
     as.character(n_total_rows - nrow(dat)),
@@ -221,7 +223,7 @@ p <- ggplot(plot_df, aes(x = weighted_pred_pr_net_pos, y = weighted_observed_pos
   labs(
     title = "UConn Lineup Reliability: Net-Positive Probability Calibration",
     subtitle = "Rolling holdout backtest deciles (weighted by holdout possessions)",
-    x = "Predicted probability (`pred_pr_net_pos`)",
+    x = paste0("Predicted probability (`", prob_col, "`)"),
     y = "Observed net-positive rate"
   ) +
   theme_minimal(base_size = 13)

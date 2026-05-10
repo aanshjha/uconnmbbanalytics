@@ -49,6 +49,220 @@ canonicalize_lineup <- function(lineup_vec) {
   )
 }
 
+split_lineup_players <- function(lineup_key) {
+  toks <- unlist(stringr::str_split(as.character(lineup_key), "\\|"))
+  toks <- stringr::str_trim(toks)
+  toks[nzchar(toks)]
+}
+
+normalize_player_token <- function(x) {
+  x <- as.character(x)
+  norm <- vapply(x, function(tok) {
+    tok <- stringr::str_squish(tok)
+    if (grepl(",", tok, fixed = TRUE)) {
+      parts <- stringr::str_split(tok, ",", simplify = TRUE)
+      if (ncol(parts) >= 2) {
+        lhs <- stringr::str_trim(parts[1])
+        rhs <- stringr::str_trim(parts[2])
+        if (nzchar(lhs) && nzchar(rhs)) tok <- paste(rhs, lhs)
+      }
+    }
+    tok <- tolower(gsub("[^[:alnum:] ]", " ", tok, perl = TRUE))
+    parts <- unlist(stringr::str_split(tok, "\\s+"))
+    parts <- parts[nzchar(parts)]
+    if (length(parts) == 0) return("")
+    paste(sort(parts), collapse = "")
+  }, character(1))
+  norm[nzchar(norm)]
+}
+
+split_lineup_players_norm <- function(lineup_key) {
+  toks <- split_lineup_players(lineup_key)
+  unique(normalize_player_token(toks))
+}
+
+normalize_player_key <- function(player_vec) {
+  vapply(as.character(player_vec), function(tok) {
+    norm <- normalize_player_token(tok)
+    if (length(norm) == 0) return(NA_character_)
+    as.character(norm[[1]])
+  }, character(1))
+}
+
+canonicalize_lineup_norm <- function(lineup_vec) {
+  vapply(as.character(lineup_vec), function(lineup_key) {
+    toks <- sort(unique(split_lineup_players_norm(lineup_key)))
+    if (length(toks) == 0) return(NA_character_)
+    paste(toks, collapse = "|")
+  }, character(1))
+}
+
+lineup_pair_keys <- function(lineup_key) {
+  players <- sort(split_lineup_players(lineup_key))
+  if (length(players) < 2) return(character(0))
+  vapply(combn(players, 2, simplify = FALSE), function(x) paste(x, collapse = "|"), character(1))
+}
+
+lineup_pair_keys_norm <- function(lineup_key) {
+  players <- sort(split_lineup_players_norm(lineup_key))
+  if (length(players) < 2) return(character(0))
+  vapply(combn(players, 2, simplify = FALSE), function(x) paste(x, collapse = "|"), character(1))
+}
+
+lineup_trio_keys <- function(lineup_key) {
+  players <- sort(split_lineup_players(lineup_key))
+  if (length(players) < 3) return(character(0))
+  vapply(combn(players, 3, simplify = FALSE), function(x) paste(x, collapse = "|"), character(1))
+}
+
+load_player_archetypes <- function(archetype_path, active_players = NULL) {
+  if (!file.exists(archetype_path)) {
+    stop("Missing required archetype file: ", archetype_path, call. = FALSE)
+  }
+
+  arche <- readr::read_csv(archetype_path, show_col_types = FALSE) %>%
+    dplyr::mutate(
+      player = stringr::str_trim(as.character(player)),
+      archetype = toupper(stringr::str_trim(as.character(archetype)))
+    )
+
+  required <- c("player", "archetype")
+  missing <- setdiff(required, names(arche))
+  if (length(missing) > 0) {
+    stop("player_archetypes.csv missing required columns: ", paste(missing, collapse = ", "), call. = FALSE)
+  }
+
+  arche <- arche %>%
+    dplyr::filter(!is.na(player), nzchar(player), !is.na(archetype), nzchar(archetype))
+
+  allowed <- c("GUARD", "WING", "BIG")
+  bad <- arche %>%
+    dplyr::filter(!(archetype %in% allowed))
+  if (nrow(bad) > 0) {
+    stop(
+      "player_archetypes.csv has invalid archetype values. Allowed: GUARD,WING,BIG. Bad players: ",
+      paste(utils::head(bad$player, 10), collapse = ", "),
+      call. = FALSE
+    )
+  }
+
+  dup <- arche %>%
+    dplyr::count(player, name = "n") %>%
+    dplyr::filter(n > 1)
+  if (nrow(dup) > 0) {
+    stop(
+      "player_archetypes.csv has duplicate players. Examples: ",
+      paste(utils::head(dup$player, 10), collapse = ", "),
+      call. = FALSE
+    )
+  }
+
+  if (!is.null(active_players) && length(active_players) > 0) {
+    active_tbl <- tibble::tibble(player = sort(unique(stringr::str_trim(as.character(active_players)))))
+    missing_players <- active_tbl %>%
+      dplyr::anti_join(arche %>% dplyr::select(player), by = "player")
+    if (nrow(missing_players) > 0) {
+      stop(
+        "player_archetypes.csv is missing active players: ",
+        paste(missing_players$player, collapse = ", "),
+        call. = FALSE
+      )
+    }
+  }
+
+  arche %>% dplyr::select(player, archetype)
+}
+
+compute_lineup_archetype_balance <- function(lineup_key, arche_map) {
+  if (is.null(arche_map) || nrow(arche_map) == 0) return(0.5)
+  players <- split_lineup_players(lineup_key)
+  if (length(players) == 0) return(0.5)
+
+  map <- stats::setNames(arche_map$archetype, arche_map$player)
+  arche <- unname(map[players])
+  arche <- arche[!is.na(arche)]
+  if (length(arche) == 0) return(0.5)
+
+  cnt_guard <- sum(arche == "GUARD")
+  cnt_wing <- sum(arche == "WING")
+  cnt_big <- sum(arche == "BIG")
+
+  # Best shape is 2 guards + 2 wings + 1 big. Score in [0,1].
+  deviation <- abs(cnt_guard - 2) + abs(cnt_wing - 2) + abs(cnt_big - 1)
+  score <- 1 - (deviation / 8)
+  max(0, min(1, score))
+}
+
+load_manual_defensive_events <- function(manual_root, games_joined = NULL) {
+  if (!dir.exists(manual_root)) {
+    return(tibble::tibble())
+  }
+
+  subdirs <- c("_conf", "_nc", "_bet", "_ncaatourn")
+  roots <- file.path(manual_root, subdirs)
+  files <- unlist(lapply(roots[file.exists(roots)], function(d) {
+    list.files(d, pattern = "\\.csv$", full.names = TRUE, recursive = FALSE)
+  }), use.names = FALSE)
+  files <- files[!grepl("_espn_generation_summary\\.csv$", files)]
+  if (length(files) == 0) return(tibble::tibble())
+
+  all_rows <- lapply(files, function(path) {
+    tryCatch(
+      readr::read_csv(path, show_col_types = FALSE),
+      error = function(e) NULL
+    )
+  })
+  all_rows <- all_rows[!vapply(all_rows, is.null, logical(1))]
+  if (length(all_rows) == 0) return(tibble::tibble())
+
+  dat <- dplyr::bind_rows(all_rows)
+  required <- c("game_file", "game_play_number", "is_uconn_offense", "score_value", "defense_lineup_key")
+  missing <- setdiff(required, names(dat))
+  if (length(missing) > 0) {
+    stop("Manual game CSVs missing required columns: ", paste(missing, collapse = ", "), call. = FALSE)
+  }
+
+  if (!("game_date" %in% names(dat))) dat$game_date <- NA_character_
+
+  out <- dat %>%
+    dplyr::mutate(
+      game_file = as.character(game_file),
+      game_play_number = suppressWarnings(as.integer(game_play_number)),
+      is_uconn_offense = as.logical(is_uconn_offense),
+      score_value = suppressWarnings(as.numeric(score_value)),
+      defense_lineup_key = canonicalize_lineup(defense_lineup_key),
+      game_date = suppressWarnings(lubridate::ymd(game_date))
+    ) %>%
+    dplyr::filter(
+      !is.na(game_file),
+      nzchar(game_file),
+      !is.na(game_play_number),
+      !is.na(is_uconn_offense),
+      is_uconn_offense == FALSE,
+      !is.na(defense_lineup_key),
+      nzchar(defense_lineup_key)
+    ) %>%
+    dplyr::group_by(game_file, game_play_number) %>%
+    dplyr::arrange(dplyr::desc(!is.na(score_value))) %>%
+    dplyr::slice(1) %>%
+    dplyr::ungroup() %>%
+    dplyr::mutate(
+      stop_event = dplyr::if_else(!is.na(score_value) & score_value <= 0, 1, 0)
+    ) %>%
+    dplyr::select(game_file, game_play_number, game_date, defense_lineup_key, stop_event)
+
+  if (!is.null(games_joined) && nrow(games_joined) > 0 && "game_file" %in% names(games_joined)) {
+    join_cols <- c("game_file")
+    add_cols <- character(0)
+    if ("global_game_id" %in% names(games_joined)) add_cols <- c(add_cols, "global_game_id")
+    if ("game_date_parsed" %in% names(games_joined)) add_cols <- c(add_cols, "game_date_parsed")
+    out <- out %>%
+      dplyr::left_join(games_joined %>% dplyr::select(dplyr::all_of(c(join_cols, add_cols))), by = "game_file")
+  }
+
+  out
+}
+
 zscore_safe <- function(x) {
   x <- as.numeric(x)
   m <- mean(x, na.rm = TRUE)

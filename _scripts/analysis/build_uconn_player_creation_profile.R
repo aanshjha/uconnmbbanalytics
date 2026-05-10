@@ -18,6 +18,7 @@ suppressPackageStartupMessages({
 })
 
 source("_scripts/utils/manual_game_data.R")
+source("_scripts/utils/lineup_model_utils.R")
 
 args <- commandArgs(trailingOnly = TRUE)
 
@@ -62,10 +63,13 @@ uconn_off <- manual_games %>%
     UsagePlayer != "TEAM"
   ) %>%
   mutate(
+    usage_player_key_norm = normalize_player_key(UsagePlayer),
+    assist_player_key_norm = normalize_player_key(AssistPlayer),
     assisted_make = FGA == 1 & FGM == 1 & !is.na(AssistPlayer) & AssistPlayer != "",
     self_created_make = FGA == 1 & FGM == 1 & (is.na(AssistPlayer) | AssistPlayer == ""),
     live_ball_turnover = TOV == 1 & !is.na(StealPlayer) & StealPlayer != ""
-  )
+  ) %>%
+  filter(!is.na(usage_player_key_norm), nzchar(usage_player_key_norm))
 
 if (nrow(uconn_off) == 0) {
   stop("No UConn offense rows found in manual-game CSVs.", call. = FALSE)
@@ -79,9 +83,18 @@ team_totals <- uconn_off %>%
   )
 
 assist_profile <- uconn_off %>%
-  filter(FGA == 1, FGM == 1, !is.na(AssistPlayer), AssistPlayer != "", AssistPlayer != "TEAM") %>%
-  group_by(player = AssistPlayer) %>%
+  filter(
+    FGA == 1,
+    FGM == 1,
+    !is.na(AssistPlayer),
+    AssistPlayer != "",
+    AssistPlayer != "TEAM",
+    !is.na(assist_player_key_norm),
+    nzchar(assist_player_key_norm)
+  ) %>%
+  group_by(player_key_norm = assist_player_key_norm) %>%
   summarise(
+    player = sort(unique(AssistPlayer))[1],
     assists_recorded = n(),
     rim_assists = sum(shot_zone == "RIM", na.rm = TRUE),
     paint_assists = sum(paint_zone == "PAINT", na.rm = TRUE),
@@ -91,8 +104,9 @@ assist_profile <- uconn_off %>%
   )
 
 player_profile <- uconn_off %>%
-  group_by(player = UsagePlayer) %>%
+  group_by(player_key_norm = usage_player_key_norm) %>%
   summarise(
+    player = sort(unique(UsagePlayer))[1],
     games = n_distinct(game_file),
     tracked_event_rows = n(),
     fga = sum(FGA, na.rm = TRUE),
@@ -118,8 +132,9 @@ player_profile <- uconn_off %>%
     sample_flag = if_else(tracked_event_rows >= min_event_rows, "ok", "small_sample"),
     .groups = "drop"
   ) %>%
-  left_join(assist_profile, by = "player") %>%
+  left_join(assist_profile, by = "player_key_norm", suffix = c("", "_assist")) %>%
   mutate(
+    player = coalesce(player, player_assist),
     assists_recorded = coalesce(assists_recorded, 0L),
     rim_assists = coalesce(rim_assists, 0L),
     paint_assists = coalesce(paint_assists, 0L),
@@ -130,6 +145,43 @@ player_profile <- uconn_off %>%
     uconn_fga_share = pct(fga, team_totals$team_fga[[1]]),
     uconn_points_share = pct(points, team_totals$team_points[[1]]),
     uconn_assist_share = pct(assists_recorded, team_totals$team_assists_recorded[[1]])
+  ) %>%
+  select(
+    player,
+    player_key_norm,
+    games,
+    tracked_event_rows,
+    fga,
+    fgm,
+    fg_pct,
+    fta,
+    ftm,
+    points,
+    turnovers,
+    live_ball_turnovers,
+    assisted_makes,
+    self_created_makes,
+    assisted_make_rate,
+    self_created_make_rate,
+    rim_fga,
+    paint_fga,
+    corner_3_fga,
+    above_break_3_fga,
+    rim_share,
+    paint_share,
+    corner_3_share,
+    above_break_3_share,
+    assists_recorded,
+    rim_assists,
+    paint_assists,
+    corner_3_assists,
+    above_break_3_assists,
+    ast_to_tov,
+    created_scoring_actions,
+    uconn_fga_share,
+    uconn_points_share,
+    uconn_assist_share,
+    sample_flag
   ) %>%
   arrange(desc(points), desc(created_scoring_actions), desc(fga), player)
 

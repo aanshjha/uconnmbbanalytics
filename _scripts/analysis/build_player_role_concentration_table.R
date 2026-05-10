@@ -9,7 +9,7 @@ source(normalizePath(file.path(dirname(.local_script_path), "..", "utils", "boot
 bootstrap_project(.local_script_path)
 rm(.local_script_path)
 
-# Build the main player role stability table from stint usage + player
+# Build the main player role concentration table from stint usage + player
 # posterior impact estimates.
 
 library(dplyr)
@@ -32,11 +32,23 @@ DATA_DIRS <- c(
   file.path(ROOT, "_data", "05_projects", "scheme_matchup_project")
 )
 OUT_DIR  <- file.path(ROOT, "_outputs")
+PLAYER_BUCKET_DIR <- file.path(OUT_DIR, "03_players")
 
 dir.create(OUT_DIR, showWarnings = FALSE, recursive = TRUE)
+dir.create(PLAYER_BUCKET_DIR, showWarnings = FALSE, recursive = TRUE)
 
 resolve_path <- function(fname, dirs = c(ROOT, DATA_DIRS, OUT_DIR, file.path(OUT_DIR, "03_players"))) {
   resolve_project_path(fname, extra_dirs = dirs)
+}
+
+write_player_output <- function(df, fname) {
+  out_paths <- c(
+    file.path(OUT_DIR, fname),
+    file.path(PLAYER_BUCKET_DIR, fname)
+  )
+  for (path in unique(out_paths)) {
+    write_csv(df, path)
+  }
 }
 
 stints_path <- resolve_path("uconn_stints_from_pbp.csv")
@@ -80,27 +92,36 @@ player_usage <- player_lineup_rows %>%
     .groups = "drop"
   )
 
-# RSI and lineup-dependence diagnostics
-# RSI = mean_possessions_per_lineup / total_possessions
-player_rsi <- player_usage %>%
+# Role Concentration Index (RCI) diagnostics
+# RCI = sum over lineups (share_of_player_possessions_in_lineup^2)
+# Higher RCI means the player's usage is concentrated in fewer lineup contexts.
+player_rci <- player_usage %>%
   group_by(player) %>%
+  mutate(
+    total_possessions = sum(poss_in_lineup, na.rm = TRUE),
+    share_of_player_possessions = if_else(
+      total_possessions > 0,
+      poss_in_lineup / total_possessions,
+      NA_real_
+    )
+  ) %>%
   summarise(
-    total_possessions     = sum(poss_in_lineup, na.rm = TRUE),
+    total_possessions     = first(total_possessions),
     unique_lineups        = n_distinct(lineup_canon),
     mean_poss_per_lineup  = mean(poss_in_lineup, na.rm = TRUE),
-    RSI                   = mean_poss_per_lineup / total_possessions,
+    RCI                   = sum(share_of_player_possessions^2, na.rm = TRUE),
     lineup_poss_sd        = sd(poss_in_lineup, na.rm = TRUE),
     lineup_poss_cv        = if_else(mean_poss_per_lineup > 0, lineup_poss_sd / mean_poss_per_lineup, NA_real_),
     .groups = "drop"
   ) %>%
   mutate(
-    RSI = if_else(is.finite(RSI), RSI, NA_real_)
+    RCI = if_else(total_possessions > 0 & is.finite(RCI), RCI, NA_real_)
   )
 
-write_csv(player_rsi, file.path(OUT_DIR, "uconn_player_rsi.csv"))
+write_player_output(player_rci, "uconn_player_rci.csv")
 
 # Merge with model-based player impact and build coach table
-player_rsi_merged <- player_rsi %>%
+player_rci_merged <- player_rci %>%
   left_join(
     player_post %>%
       select(player, net_mean, net_p05, net_p95, net_pr_pos),
@@ -108,15 +129,29 @@ player_rsi_merged <- player_rsi %>%
   )
 
 # Thresholds (tune later; these are reasonable defaults)
-RSI_STABLE_CUTOFF <- 0.03
+# Default stable cutoff corresponds to about five equal-share lineup contexts.
+RCI_STABLE_EFFECTIVE_LINEUPS_MAX <- suppressWarnings(as.numeric(Sys.getenv(
+  "RCI_STABLE_EFFECTIVE_LINEUPS_MAX",
+  "5"
+)))
+if (!is.finite(RCI_STABLE_EFFECTIVE_LINEUPS_MAX) || RCI_STABLE_EFFECTIVE_LINEUPS_MAX <= 0) {
+  stop("Invalid RCI_STABLE_EFFECTIVE_LINEUPS_MAX. Expected a positive number.")
+}
+RCI_STABLE_CUTOFF <- 1 / RCI_STABLE_EFFECTIVE_LINEUPS_MAX
+MIN_POSS_FOR_ROLE_LABEL <- suppressWarnings(as.numeric(Sys.getenv("MIN_POSS_FOR_ROLE_LABEL", "50")))
+if (!is.finite(MIN_POSS_FOR_ROLE_LABEL) || MIN_POSS_FOR_ROLE_LABEL <= 0) {
+  stop("Invalid MIN_POSS_FOR_ROLE_LABEL. Expected a positive number.")
+}
 PR_HIGH_CUTOFF    <- 0.70
 PR_LOW_CUTOFF     <- 0.30
 
-coach_table <- player_rsi_merged %>%
+coach_table <- player_rci_merged %>%
   mutate(
+    role_rci_display = if_else(total_possessions >= MIN_POSS_FOR_ROLE_LABEL, RCI, NA_real_),
     role_type = case_when(
-      is.na(RSI) ~ "UNKNOWN",
-      RSI >= RSI_STABLE_CUTOFF ~ "STABLE",
+      is.na(RCI) ~ "UNKNOWN",
+      total_possessions < MIN_POSS_FOR_ROLE_LABEL ~ "UNKNOWN",
+      RCI >= RCI_STABLE_CUTOFF ~ "STABLE",
       TRUE ~ "FLUID"
     ),
     impact_type = case_when(
@@ -126,6 +161,7 @@ coach_table <- player_rsi_merged %>%
       TRUE ~ "MID"
     ),
     recommendation = case_when(
+      role_type == "UNKNOWN" ~ "HOLD JUDGMENT (sample too small)",
       role_type == "FLUID"  & impact_type == "HIGH" ~ "LOCK ROLE (reduce lineup churn)",
       role_type == "STABLE" & impact_type == "LOW"  ~ "ROLE RE-EVAL (fit/matchups)",
       role_type == "FLUID"  & impact_type == "LOW"  ~ "HOLD JUDGMENT (needs stable reps)",
@@ -137,7 +173,7 @@ coach_table <- player_rsi_merged %>%
     player,
     total_possessions = round(total_possessions, 0),
     unique_lineups,
-    RSI = round(RSI, 4),
+    RCI = round(role_rci_display, 4),
     net_mean = round(net_mean, 3),
     net_p05  = round(net_p05, 3),
     net_p95  = round(net_p95, 3),
@@ -147,8 +183,8 @@ coach_table <- player_rsi_merged %>%
   ) %>%
   arrange(desc(net_mean), desc(total_possessions))
 
-write_csv(coach_table, file.path(OUT_DIR, "uconn_player_rsi_coach_table.csv"))
+write_player_output(coach_table, "uconn_player_rci_coach_table.csv")
 
 message("Done. Wrote to: ", OUT_DIR)
-message(" - uconn_player_rsi.csv")
-message(" - uconn_player_rsi_coach_table.csv")
+message(" - uconn_player_rci.csv")
+message(" - uconn_player_rci_coach_table.csv")

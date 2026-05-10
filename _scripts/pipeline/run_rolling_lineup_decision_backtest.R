@@ -153,6 +153,28 @@ calc_prob_metrics <- function(prob, outcome, weight, n_bins = 10L) {
   )
 }
 
+rescale01 <- function(x, default = 0.5) {
+  x <- as.numeric(x)
+  out <- rep(default, length(x))
+  ok <- is.finite(x)
+  if (!any(ok)) return(out)
+  lo <- min(x[ok], na.rm = TRUE)
+  hi <- max(x[ok], na.rm = TRUE)
+  if (!is.finite(lo) || !is.finite(hi) || hi <= lo) {
+    out[ok] <- default
+    return(out)
+  }
+  out[ok] <- (x[ok] - lo) / (hi - lo)
+  out
+}
+
+safe_quantile <- function(x, prob, default = NA_real_) {
+  x <- as.numeric(x)
+  x <- x[is.finite(x)]
+  if (length(x) == 0) return(default)
+  as.numeric(stats::quantile(x, probs = prob, na.rm = TRUE))
+}
+
 classify_decision <- function(pr, net, prior_possessions, thresholds, decision_available = NULL) {
   pr <- as.numeric(pr)
   net <- as.numeric(net)
@@ -190,14 +212,24 @@ classify_decision <- function(pr, net, prior_possessions, thresholds, decision_a
 
 summarise_decision_buckets <- function(df, decision_col = "Decision") {
   if (!(decision_col %in% names(df))) stop("Decision column not found: ", decision_col)
+  prob_col <- if ("pred_pr_net_pos_for_decision" %in% names(df)) {
+    "pred_pr_net_pos_for_decision"
+  } else {
+    "pred_pr_net_pos"
+  }
+  net_col <- if ("pred_net_ppp_mean_for_decision" %in% names(df)) {
+    "pred_net_ppp_mean_for_decision"
+  } else {
+    "pred_net_ppp_mean"
+  }
   df %>%
     group_by(decision_bucket = .data[[decision_col]]) %>%
     summarise(
       total_holdout_possessions = sum(holdout_weight, na.rm = TRUE),
-      weighted_pred_pr_net_pos = weighted_mean_safe(pred_pr_net_pos, holdout_weight),
+      weighted_pred_pr_net_pos = weighted_mean_safe(.data[[prob_col]], holdout_weight),
       weighted_observed_positive_rate = weighted_mean_safe(observed_net_positive_num, holdout_weight),
       weighted_net_prob_calibration_gap = weighted_observed_positive_rate - weighted_pred_pr_net_pos,
-      weighted_pred_net_ppp = weighted_mean_safe(pred_net_ppp_mean, holdout_weight),
+      weighted_pred_net_ppp = weighted_mean_safe(.data[[net_col]], holdout_weight),
       weighted_realized_net_ppp = weighted_mean_safe(holdout_raw_net_ppp, holdout_weight),
       .groups = "drop"
     ) %>%
@@ -369,8 +401,7 @@ BT_MAX_TREEDEPTH <- as.integer(Sys.getenv("BT_MAX_TREEDEPTH", "15"))
 BT_FORCE_REFIT <- as_bool_env("BT_FORCE_REFIT")
 BT_MAX_HOLDOUT_GAMES <- as.integer(Sys.getenv("BT_MAX_HOLDOUT_GAMES", "0")) # 0 = no limit
 
-# Decision rule v2 seeds (full-net posterior predictive, baseline context).
-# Final thresholds are tuned with a clean forward split in this script.
+# Decision rule legacy seeds (kept for compatibility columns only).
 DECISION_RULE_PROB_POSSESSIONS <- as.numeric(Sys.getenv("DECISION_RULE_PROB_POSSESSIONS", "40"))
 DECISION_PLAY_MORE_PR_NET_MIN <- as.numeric(Sys.getenv("DECISION_PLAY_MORE_PR_NET_MIN", "0.553"))
 DECISION_PLAY_MORE_NET_PPP_MIN <- as.numeric(Sys.getenv("DECISION_PLAY_MORE_NET_PPP_MIN", "-0.015"))
@@ -379,9 +410,25 @@ DECISION_LEAN_IN_NET_PPP_MIN <- as.numeric(Sys.getenv("DECISION_LEAN_IN_NET_PPP_
 DECISION_LIMIT_WATCH_PR_NET_MAX <- as.numeric(Sys.getenv("DECISION_LIMIT_WATCH_PR_NET_MAX", "0.657"))
 DECISION_LIMIT_WATCH_NET_PPP_MAX <- as.numeric(Sys.getenv("DECISION_LIMIT_WATCH_NET_PPP_MAX", "-0.06"))
 
-# Forward split for nested-like threshold tuning.
+# Forward split for threshold/weight tuning.
 BT_TUNE_FRACTION <- as.numeric(Sys.getenv("BT_TUNE_FRACTION", "0.70"))
 BT_TUNE_MIN_GAMES <- as.integer(Sys.getenv("BT_TUNE_MIN_GAMES", "8"))
+DECISION_V3_MIN_BUCKET_POS <- as.numeric(Sys.getenv("DECISION_V3_MIN_BUCKET_POS", "10"))
+
+V4_W_DEF_GRID <- c(0.55, 0.60, 0.65, 0.70)
+V4_W_OFF_GRID <- c(0.20, 0.25, 0.30, 0.35)
+V4_ALPHA_OPP_GRID <- c(0.05, 0.10, 0.15)
+V4_DEF_FLOOR_Q_GRID <- c(0.30, 0.35, 0.40)
+V4_W_STYLE_MIN <- 0.05
+V4_W_STYLE_MAX <- 0.20
+V4_DEF_PPP_DELTA_MAX <- 0.005
+V4_SURVIVE_DELTA_MIN <- -0.010
+V4_NET_PPP_DELTA_MIN <- 0.010
+
+FLOOR_RIM_PLUS_THREE_SHARE <- 0.6190
+FLOOR_FTA_PER_FGA <- 0.2308
+CEILING_TOV_PER_FGA <- 0.2000
+CEILING_NON_RIM_PAINT_SHARE <- 0.2596
 
 # Strict calibration gates.
 BT_CALIB_MIN_ROWS <- as.integer(Sys.getenv("BT_CALIB_MIN_ROWS", "80"))
@@ -400,6 +447,7 @@ if (!is.finite(BT_STAN_WARMUP) || BT_STAN_WARMUP < 100 || BT_STAN_WARMUP >= BT_S
 }
 if (!is.finite(BT_TUNE_FRACTION) || BT_TUNE_FRACTION <= 0.50 || BT_TUNE_FRACTION >= 0.95) BT_TUNE_FRACTION <- 0.70
 if (!is.finite(BT_TUNE_MIN_GAMES) || BT_TUNE_MIN_GAMES < 4) BT_TUNE_MIN_GAMES <- 8L
+if (!is.finite(DECISION_V3_MIN_BUCKET_POS) || DECISION_V3_MIN_BUCKET_POS < 1) DECISION_V3_MIN_BUCKET_POS <- 10
 if (!is.finite(BT_CALIB_MIN_ROWS) || BT_CALIB_MIN_ROWS < 30) BT_CALIB_MIN_ROWS <- 80L
 if (!is.finite(BT_CALIB_MIN_GAMES) || BT_CALIB_MIN_GAMES < 4) BT_CALIB_MIN_GAMES <- 8L
 if (!is.finite(BT_CALIB_MAX_ECE) || BT_CALIB_MAX_ECE <= 0 || BT_CALIB_MAX_ECE >= 0.5) BT_CALIB_MAX_ECE <- 0.08
@@ -418,20 +466,15 @@ message(
   " force_refit=", BT_FORCE_REFIT
 )
 message(
-  "Decision rule v2 | prob_possessions=", DECISION_RULE_PROB_POSSESSIONS,
-  " | PLAY_MORE: pr>=", DECISION_PLAY_MORE_PR_NET_MIN, " & net_ppp>=", DECISION_PLAY_MORE_NET_PPP_MIN,
-  " | LEAN_IN: pr>=", DECISION_LEAN_IN_PR_NET_MIN, " & net_ppp>=", DECISION_LEAN_IN_NET_PPP_MIN,
-  " | LIMIT/WATCH if pr<=", DECISION_LIMIT_WATCH_PR_NET_MAX, " or net_ppp<=", DECISION_LIMIT_WATCH_NET_PPP_MAX
+  "Decision engine v4 | defense floor + offensive upside + fixed shot style constraints",
+  " | labels = DEF_FLOOR_FAIL/DEF_FLOOR_PASS_UPSIDE_HIGH/MED/LOW/LOW_SAMPLE/UNSEEN"
 )
 message(
   "Forward tuning config | tune_fraction=", BT_TUNE_FRACTION,
   " min_tune_games=", BT_TUNE_MIN_GAMES,
-  " | strict calibration rows>=", BT_CALIB_MIN_ROWS,
-  " games>=", BT_CALIB_MIN_GAMES,
-  " ece<=", BT_CALIB_MAX_ECE,
-  " max_gap<=", BT_CALIB_MAX_DECILE_GAP,
-  " slope in [", BT_CALIB_SLOPE_MIN, ", ", BT_CALIB_SLOPE_MAX, "]",
-  " | fallback_shrink=", BT_CALIB_FALLBACK_SHRINK
+  " | guardrails: d_def_ppp<=", V4_DEF_PPP_DELTA_MAX,
+  " d_survive>=", V4_SURVIVE_DELTA_MIN,
+  " d_net_ppp>=", V4_NET_PPP_DELTA_MIN
 )
 
 # ---------- Paths ----------
@@ -772,8 +815,6 @@ for (idx in seq_along(holdout_games)) {
       synergy_p05 = round(synergy_p05, 3),
       synergy_p95 = round(synergy_p95, 3),
       pr_synergy_pos = round(pr_synergy_pos, 3),
-      decision_pred_net_ppp_mean = round(decision_pred_net_ppp_mean, 3),
-      decision_pred_pr_net_pos = round(decision_pred_pr_net_pos, 3),
       expected_points_per_40 = round(expected_points_per_40, 1),
       Decision = case_when(
         possessions >= 70 &
@@ -828,6 +869,9 @@ for (idx in seq_along(holdout_games)) {
     lineup_pretty_holdout = uconn_lineup_canon
   )
 
+  # Holdout-context predictions are useful diagnostics, but the decision audit
+  # below must calibrate and tune against the same baseline-context signal the
+  # live coach table uses.
   seen_holdout_lineups <- holdout_lineups %>%
     semi_join(coach_pred, by = c("uconn_lineup_canon" = "lineup"))
 
@@ -892,7 +936,7 @@ for (idx in seq_along(holdout_games)) {
       pace_train = pace_train_scalar,
       holdout_points_per_40 = if (is.finite(pace_train_scalar)) holdout_raw_net_ppp * 40 * pace_train_scalar else NA_real_,
       observed_net_positive = holdout_raw_net_ppp > 0,
-      decision_available = !is.na(Decision),
+      decision_available = is.finite(decision_pred_pr_net_pos) & is.finite(decision_pred_net_ppp_mean),
       Decision = if_else(is.na(Decision), "UNSEEN", Decision),
       lineup_pretty = coalesce(lineup_pretty, lineup_pretty_holdout)
     ) %>%
@@ -944,15 +988,15 @@ eval_df <- rows_df %>%
     observed_net_positive_num = as.numeric(observed_net_positive),
     holdout_weight = holdout_possessions,
     has_prob_pred = is.finite(pred_pr_net_pos),
-    has_value_pred = is.finite(pred_net_ppp_mean)
+    has_value_pred = is.finite(pred_net_ppp_mean),
+    has_decision_prob_pred = is.finite(decision_pred_pr_net_pos),
+    has_decision_value_pred = is.finite(decision_pred_net_ppp_mean)
   )
 
 # Clean forward split (tune early holdout games, evaluate on later holdout games).
 decision_eval <- eval_df %>%
   filter(
     decision_available,
-    has_prob_pred,
-    has_value_pred,
     is.finite(prior_possessions),
     is.finite(holdout_weight),
     holdout_weight > 0
@@ -980,218 +1024,913 @@ message(
   if (length(forward_games) > 0) max(forward_games) else NA_integer_, ")"
 )
 
-# Strict calibration handling for decision probabilities.
-calib_train <- decision_eval %>%
-  filter(holdout_game_id %in% tune_games)
+classify_v3 <- function(score, prior_5man_poss, prior_pair_events, prior_trio_poss, t_guardable, t_high_risk, decision_available = NULL) {
+  if (is.null(decision_available)) decision_available <- rep(TRUE, length(score))
+  score <- as.numeric(score)
+  prior_5man_poss <- as.numeric(prior_5man_poss)
+  prior_pair_events <- as.numeric(prior_pair_events)
+  prior_trio_poss <- as.numeric(prior_trio_poss)
+  decision_available <- as.logical(decision_available)
+  decision_available[is.na(decision_available)] <- FALSE
 
-calib_fit <- fit_platt_calibration(
-  calib_train,
-  prob_col = "pred_pr_net_pos",
-  outcome_col = "observed_net_positive_num",
-  weight_col = "holdout_weight"
-)
-calib_raw_metrics <- calc_prob_metrics(
-  calib_train$pred_pr_net_pos,
-  calib_train$observed_net_positive_num,
-  calib_train$holdout_weight
-)
-platt_train_prob <- apply_platt_calibration(
-  calib_train$pred_pr_net_pos,
-  intercept = calib_fit$intercept[[1]],
-  slope = calib_fit$slope[[1]]
-)
-calib_platt_metrics <- calc_prob_metrics(
-  platt_train_prob,
-  calib_train$observed_net_positive_num,
-  calib_train$holdout_weight
-)
-
-calibration_mode <- "shrunk_raw"
-calibration_status <- "fallback_shrink_strict_gate_fail"
-calibration_intercept <- NA_real_
-calibration_slope <- NA_real_
-
-platt_strict_ok <- (
-  nrow(calib_train) >= BT_CALIB_MIN_ROWS &&
-    n_distinct(calib_train$holdout_game_id) >= BT_CALIB_MIN_GAMES &&
-    identical(calib_fit$status[[1]], "ok") &&
-    is.finite(calib_fit$slope[[1]]) &&
-    calib_fit$slope[[1]] >= BT_CALIB_SLOPE_MIN &&
-    calib_fit$slope[[1]] <= BT_CALIB_SLOPE_MAX &&
-    is.finite(calib_platt_metrics$weighted_ece_decile[[1]]) &&
-    calib_platt_metrics$weighted_ece_decile[[1]] <= BT_CALIB_MAX_ECE &&
-    is.finite(calib_platt_metrics$max_abs_weighted_decile_gap[[1]]) &&
-    calib_platt_metrics$max_abs_weighted_decile_gap[[1]] <= BT_CALIB_MAX_DECILE_GAP &&
-    is.finite(calib_raw_metrics$weighted_ece_decile[[1]]) &&
-    calib_platt_metrics$weighted_ece_decile[[1]] <= (calib_raw_metrics$weighted_ece_decile[[1]] - 0.005)
-)
-
-if (platt_strict_ok) {
-  calibration_mode <- "platt"
-  calibration_status <- "ok_strict"
-  calibration_intercept <- calib_fit$intercept[[1]]
-  calibration_slope <- calib_fit$slope[[1]]
-}
-
-raw_prob_all <- as.numeric(eval_df$pred_pr_net_pos)
-if (identical(calibration_mode, "platt")) {
-  calibrated_prob_all <- apply_platt_calibration(
-    raw_prob_all,
-    intercept = calibration_intercept,
-    slope = calibration_slope
+  out <- rep("UNSEEN", length(score))
+  ok <- decision_available & is.finite(score) & is.finite(prior_5man_poss) & is.finite(prior_pair_events) & is.finite(prior_trio_poss)
+  out[ok] <- dplyr::case_when(
+    prior_5man_poss[ok] == 0 & prior_pair_events[ok] < 20 ~ "UNSEEN",
+    prior_5man_poss[ok] < 30 | prior_pair_events[ok] < 80 | prior_trio_poss[ok] < 40 ~ "LOW_SAMPLE",
+    score[ok] <= t_high_risk ~ "HIGH_RISK",
+    score[ok] >= t_guardable ~ "GUARDABLE",
+    TRUE ~ "SURVIVE_4"
   )
-} else {
-  calibrated_prob_all <- 0.5 + BT_CALIB_FALLBACK_SHRINK * (clamp_prob(raw_prob_all) - 0.5)
+  out
 }
-calibrated_prob_all <- clamp_prob(calibrated_prob_all, eps = 0.01)
-calibrated_prob_all[!is.finite(raw_prob_all)] <- NA_real_
+
+downgrade_v3_label <- function(x) {
+  dplyr::case_when(
+    x == "GUARDABLE" ~ "SURVIVE_4",
+    x == "SURVIVE_4" ~ "HIGH_RISK",
+    TRUE ~ x
+  )
+}
+
+tune_v3_thresholds <- function(tune_df) {
+  q_guardable_vals <- c(0.20, 0.25, 0.30, 0.35)
+  q_high_risk_vals <- c(0.15, 0.20, 0.25, 0.30)
+  explored <- 0L
+  feasible <- 0L
+  best <- NULL
+  best_score <- -Inf
+
+  if (nrow(tune_df) < 40) {
+    return(list(
+      t_guardable = suppressWarnings(stats::quantile(tune_df$decision_survive_score_raw, probs = 0.75, na.rm = TRUE)),
+      t_high_risk = suppressWarnings(stats::quantile(tune_df$decision_survive_score_raw, probs = 0.20, na.rm = TRUE)),
+      q_guardable = 0.25,
+      q_high_risk = 0.20,
+      status = "fallback_insufficient_tune_rows",
+      explored = 0L,
+      feasible = 0L
+    ))
+  }
+
+  for (qg in q_guardable_vals) {
+    for (qh in q_high_risk_vals) {
+      explored <- explored + 1L
+      t_guardable <- as.numeric(stats::quantile(tune_df$decision_survive_score_raw, probs = 1 - qg, na.rm = TRUE))
+      t_high_risk <- as.numeric(stats::quantile(tune_df$decision_survive_score_raw, probs = qh, na.rm = TRUE))
+      if (!is.finite(t_guardable) || !is.finite(t_high_risk) || t_guardable <= t_high_risk) next
+
+      tmp <- tune_df %>%
+        mutate(
+          Decision_tmp = classify_v3(
+            score = decision_survive_score_raw,
+            prior_5man_poss = prior_possessions,
+            prior_pair_events = prior_pair_events,
+            prior_trio_poss = prior_trio_possessions,
+            t_guardable = t_guardable,
+            t_high_risk = t_high_risk,
+            decision_available = decision_available
+          )
+        )
+
+      guard_pos <- sum(tmp$holdout_weight[tmp$Decision_tmp == "GUARDABLE"], na.rm = TRUE)
+      high_pos <- sum(tmp$holdout_weight[tmp$Decision_tmp == "HIGH_RISK"], na.rm = TRUE)
+      if (guard_pos < DECISION_V3_MIN_BUCKET_POS || high_pos < DECISION_V3_MIN_BUCKET_POS) next
+
+      guard_survive <- weighted_mean_safe(tmp$observed_survive4[tmp$Decision_tmp == "GUARDABLE"], tmp$holdout_weight[tmp$Decision_tmp == "GUARDABLE"])
+      high_survive <- weighted_mean_safe(tmp$observed_survive4[tmp$Decision_tmp == "HIGH_RISK"], tmp$holdout_weight[tmp$Decision_tmp == "HIGH_RISK"])
+      if (!is.finite(guard_survive) || !is.finite(high_survive)) next
+      separation <- guard_survive - high_survive
+      if (!is.finite(separation)) next
+
+      rec <- tmp %>%
+        filter(Decision_tmp %in% c("GUARDABLE", "SURVIVE_4")) %>%
+        group_by(holdout_game_id) %>%
+        arrange(desc(decision_survive_score_raw), desc(prior_possessions), .by_group = TRUE) %>%
+        slice(1) %>%
+        ungroup() %>%
+        select(holdout_game_id, rec_survive = observed_survive4, rec_w = holdout_weight)
+
+      base <- tmp %>%
+        filter(decision_available) %>%
+        group_by(holdout_game_id) %>%
+        arrange(desc(prior_possessions), desc(holdout_weight), .by_group = TRUE) %>%
+        slice(1) %>%
+        ungroup() %>%
+        select(holdout_game_id, base_survive = observed_survive4)
+
+      lift_df <- rec %>% left_join(base, by = "holdout_game_id") %>% mutate(lift = rec_survive - base_survive)
+      lift <- weighted_mean_safe(lift_df$lift, lift_df$rec_w)
+      if (!is.finite(lift)) lift <- 0
+
+      feasible <- feasible + 1L
+      score <- 120 * separation + 80 * lift + (guard_pos + high_pos) / 100
+
+      if (is.finite(score) && score > best_score) {
+        best_score <- score
+        best <- list(
+          t_guardable = t_guardable,
+          t_high_risk = t_high_risk,
+          q_guardable = qg,
+          q_high_risk = qh,
+          status = "ok",
+          explored = explored,
+          feasible = feasible,
+          tune_weighted_separation = separation,
+          tune_weighted_lift_vs_baseline = lift
+        )
+      }
+    }
+  }
+
+  if (is.null(best)) {
+    return(list(
+      t_guardable = as.numeric(stats::quantile(tune_df$decision_survive_score_raw, probs = 0.75, na.rm = TRUE)),
+      t_high_risk = as.numeric(stats::quantile(tune_df$decision_survive_score_raw, probs = 0.20, na.rm = TRUE)),
+      q_guardable = 0.25,
+      q_high_risk = 0.20,
+      status = "fallback_no_feasible_grid_solution",
+      explored = explored,
+      feasible = feasible,
+      tune_weighted_separation = NA_real_,
+      tune_weighted_lift_vs_baseline = NA_real_
+    ))
+  }
+  best
+}
+
+# Required V3 inputs.
+archetype_path <- file.path("_data", "01_core_inputs", "player_archetypes.csv")
+active_players <- sort(unique(unlist(stringr::str_split(stints2$uconn_lineup_canon, "\\|"))))
+arche_map <- load_player_archetypes(archetype_path, active_players = active_players)
+
+manual_events <- load_manual_defensive_events(
+  manual_root = file.path("_data", "03_manual_game_csv"),
+  games_joined = games2
+)
+if (nrow(manual_events) == 0) {
+  stop("No manual defensive events loaded from _data/03_manual_game_csv. V3 requires this source.")
+}
+
+non_ex_game_ids <- if ("ex_game" %in% names(games2)) {
+  games2 %>%
+    filter(!dplyr::coalesce(ex_game, FALSE)) %>%
+    pull(global_game_id) %>%
+    unique()
+} else {
+  unique(games2$global_game_id)
+}
+manual_games_covered <- manual_events %>%
+  filter(!is.na(global_game_id), global_game_id %in% non_ex_game_ids) %>%
+  summarise(n = dplyr::n_distinct(game_file), .groups = "drop") %>%
+  pull(n)
+manual_coverage_rate <- manual_games_covered / max(1, dplyr::n_distinct(games2$game_file[games2$global_game_id %in% non_ex_game_ids]))
+if (!is.finite(manual_coverage_rate) || manual_coverage_rate < 0.95) {
+  stop(sprintf(
+    "Manual defensive-play coverage is %.3f (< 0.95).",
+    manual_coverage_rate
+  ))
+}
+
+leak_candidates <- c(
+  file.path("_outputs", "02_defense_leaks", "uconn_lineup_def_leaks_posterior.csv"),
+  file.path("_outputs", "uconn_lineup_def_leaks_posterior.csv"),
+  file.path("_outputs", "01_lineup_core", "uconn_lineup_def_leaks_posterior.csv")
+)
+leak_path <- leak_candidates[file.exists(leak_candidates)][1]
+if (length(leak_path) == 0 || !nzchar(leak_path)) {
+  stop("Missing required defensive leak posterior for V3 scoring.")
+}
+leak_tbl <- read_csv(leak_path, show_col_types = FALSE)
+if (!("lineup" %in% names(leak_tbl)) && ("lineup_key" %in% names(leak_tbl))) {
+  leak_tbl <- leak_tbl %>% rename(lineup = lineup_key)
+}
+if (!all(c("lineup", "pr_leak") %in% names(leak_tbl))) {
+  stop("Defensive leak posterior missing lineup/pr_leak columns.")
+}
+leak_tbl <- leak_tbl %>%
+  mutate(
+    lineup = canonicalize_lineup(lineup),
+    pr_leak = as.numeric(pr_leak)
+  ) %>%
+  select(lineup, pr_leak)
+
+shot_candidates <- c(
+  file.path("_outputs", "01_lineup_core", "uconn_lineup_shot_diet.csv"),
+  file.path("_outputs", "uconn_lineup_shot_diet.csv")
+)
+shot_path <- shot_candidates[file.exists(shot_candidates)][1]
+if (length(shot_path) == 0 || !nzchar(shot_path)) {
+  stop("Missing required lineup shot diet profile for V4 backtest.")
+}
+shot_tbl <- read_csv(shot_path, show_col_types = FALSE)
+if (!("lineup_key_norm" %in% names(shot_tbl))) {
+  if (!("lineup_pretty" %in% names(shot_tbl))) {
+    stop("Shot diet profile requires lineup_pretty or lineup_key_norm.", call. = FALSE)
+  }
+  shot_tbl <- shot_tbl %>%
+    mutate(lineup_key_norm = canonicalize_lineup_norm(lineup_pretty))
+}
+shot_tbl <- shot_tbl %>%
+  mutate(
+    lineup_key_norm = canonicalize_lineup_norm(lineup_key_norm),
+    fga = as.numeric(fga),
+    rim_share = as.numeric(rim_share),
+    paint_share = as.numeric(paint_share),
+    corner_3_share = as.numeric(corner_3_share),
+    above_break_3_share = as.numeric(above_break_3_share),
+    fta_per_fga = as.numeric(fta_per_fga),
+    tov_per_fga = as.numeric(tov_per_fga),
+    rim_plus_three_share = as.numeric(if ("rim_plus_three_share" %in% names(shot_tbl)) rim_plus_three_share else NA_real_),
+    non_rim_paint_share = as.numeric(if ("non_rim_paint_share" %in% names(shot_tbl)) non_rim_paint_share else NA_real_)
+  ) %>%
+  mutate(
+    rim_plus_three_share = if_else(
+      is.finite(rim_plus_three_share),
+      rim_plus_three_share,
+      coalesce(rim_share, 0) + coalesce(corner_3_share, 0) + coalesce(above_break_3_share, 0)
+    ),
+    non_rim_paint_share = if_else(
+      is.finite(non_rim_paint_share),
+      non_rim_paint_share,
+      coalesce(paint_share, 0) - coalesce(rim_share, 0)
+    )
+  ) %>%
+  filter(!is.na(lineup_key_norm), nzchar(lineup_key_norm)) %>%
+  group_by(lineup_key_norm) %>%
+  summarise(
+    fta_per_fga_lineup = weighted_mean_safe(fta_per_fga, pmax(fga, 1)),
+    tov_per_fga_lineup = weighted_mean_safe(tov_per_fga, pmax(fga, 1)),
+    rim_plus_three_share = weighted_mean_safe(rim_plus_three_share, pmax(fga, 1)),
+    non_rim_paint_share = weighted_mean_safe(non_rim_paint_share, pmax(fga, 1)),
+    shot_sample_flag = if_else(any(tolower(coalesce(sample_flag, "")) == "ok"), "ok", "small_sample"),
+    .groups = "drop"
+  )
+if (nrow(shot_tbl) == 0) {
+  stop("Shot diet profile has no usable lineup rows after normalization.", call. = FALSE)
+}
+
+player_creation_candidates <- c(
+  file.path("_outputs", "03_players", "uconn_player_creation_profile.csv"),
+  file.path("_outputs", "uconn_player_creation_profile.csv")
+)
+player_creation_path <- player_creation_candidates[file.exists(player_creation_candidates)][1]
+if (length(player_creation_path) == 0 || !nzchar(player_creation_path)) {
+  stop("Missing required player creation profile for V4 backtest.")
+}
+player_creation_tbl <- read_csv(player_creation_path, show_col_types = FALSE)
+if (!("player_key_norm" %in% names(player_creation_tbl))) {
+  if (!("player" %in% names(player_creation_tbl))) {
+    stop("Player creation profile requires player or player_key_norm.", call. = FALSE)
+  }
+  player_creation_tbl <- player_creation_tbl %>%
+    mutate(player_key_norm = normalize_player_key(player))
+}
+if (!("created_scoring_actions" %in% names(player_creation_tbl))) {
+  stop("Player creation profile missing created_scoring_actions.", call. = FALSE)
+}
+if (!("ast_to_tov" %in% names(player_creation_tbl))) player_creation_tbl$ast_to_tov <- NA_real_
+if (!("self_created_make_rate" %in% names(player_creation_tbl))) player_creation_tbl$self_created_make_rate <- NA_real_
+if (!("tracked_event_rows" %in% names(player_creation_tbl))) player_creation_tbl$tracked_event_rows <- 1
+
+player_creation_tbl <- player_creation_tbl %>%
+  mutate(
+    player_key_norm = normalize_player_key(player_key_norm),
+    created_scoring_actions = as.numeric(created_scoring_actions),
+    ast_to_tov = as.numeric(ast_to_tov),
+    self_created_make_rate = as.numeric(self_created_make_rate),
+    tracked_event_rows = as.numeric(tracked_event_rows)
+  ) %>%
+  filter(!is.na(player_key_norm), nzchar(player_key_norm)) %>%
+  group_by(player_key_norm) %>%
+  summarise(
+    created_scoring_actions = weighted_mean_safe(created_scoring_actions, pmax(tracked_event_rows, 1)),
+    ast_to_tov = weighted_mean_safe(ast_to_tov, pmax(tracked_event_rows, 1)),
+    self_created_make_rate = weighted_mean_safe(self_created_make_rate, pmax(tracked_event_rows, 1)),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    creation_raw = 0.60 * zscore_safe(created_scoring_actions) +
+      0.25 * zscore_safe(ast_to_tov) +
+      0.15 * zscore_safe(self_created_make_rate),
+    creation_score_player = rescale01(creation_raw, default = 0.5)
+  )
+player_creation_map <- setNames(player_creation_tbl$creation_score_player, player_creation_tbl$player_key_norm)
+
+# Holdout defensive outcomes.
+holdout_lineup_def <- stints2 %>%
+  group_by(holdout_game_id = game_id, lineup = uconn_lineup_canon) %>%
+  summarise(
+    holdout_pts_against = sum(points_against, na.rm = TRUE),
+    holdout_possessions_def = sum(w, na.rm = TRUE),
+    holdout_def_ppp = if_else(holdout_possessions_def > 0, holdout_pts_against / holdout_possessions_def, NA_real_),
+    .groups = "drop"
+  )
+holdout_game_def <- stints2 %>%
+  group_by(holdout_game_id = game_id) %>%
+  summarise(
+    holdout_game_team_def_ppp = sum(points_against, na.rm = TRUE) / sum(w, na.rm = TRUE),
+    .groups = "drop"
+  )
+opp_context <- games2 %>%
+  transmute(
+    holdout_game_id = global_game_id,
+    opp_adjO_z_ctx = zscore_safe(opp_adjO),
+    opp_adjD_z_ctx = zscore_safe(opp_adjD)
+  )
+
+eval_df <- eval_df %>%
+  left_join(holdout_lineup_def, by = c("holdout_game_id", "lineup")) %>%
+  left_join(holdout_game_def, by = "holdout_game_id") %>%
+  left_join(opp_context, by = "holdout_game_id") %>%
+  mutate(
+    holdout_def_ppp = if_else(is.finite(holdout_def_ppp), holdout_def_ppp, NA_real_),
+    observed_def_ppp_gap_vs_game_baseline = holdout_def_ppp - holdout_game_team_def_ppp,
+    observed_survive4 = as.numeric(observed_def_ppp_gap_vs_game_baseline <= 0.03),
+    observed_leaky = as.numeric(observed_def_ppp_gap_vs_game_baseline >= 0.08)
+  )
+
+# Precompute pair/trio priors by holdout game.
+pair_models <- list()
+pair_baseline <- list()
+trio_models <- list()
+trio_baseline <- list()
+for (g in split_games) {
+  pair_train <- manual_events %>%
+    filter(!is.na(global_game_id), global_game_id < g)
+
+  p_base <- weighted_mean_safe(pair_train$stop_event, rep(1, nrow(pair_train)))
+  if (!is.finite(p_base)) p_base <- 0.5
+  pair_baseline[[as.character(g)]] <- p_base
+
+  if (nrow(pair_train) > 0) {
+    pair_tbl <- pair_train %>%
+      mutate(pair_key = lapply(defense_lineup_key, lineup_pair_keys_norm)) %>%
+      select(stop_event, pair_key) %>%
+      tidyr::unnest_longer(pair_key, values_to = "pair_key") %>%
+      filter(!is.na(pair_key), nzchar(pair_key)) %>%
+      group_by(pair_key) %>%
+      summarise(
+        events = n(),
+        stops = sum(stop_event, na.rm = TRUE),
+        pair_survive = (stops + 80 * p_base) / (events + 80),
+        .groups = "drop"
+      )
+  } else {
+    pair_tbl <- tibble(pair_key = character(), events = numeric(), stops = numeric(), pair_survive = numeric())
+  }
+  pair_models[[as.character(g)]] <- pair_tbl
+
+  trio_train <- stints2 %>% filter(game_id < g, is.finite(poss_est), poss_est > 0, is.finite(points_against))
+  if (nrow(trio_train) > 0) {
+    train_def_ppp <- sum(trio_train$points_against, na.rm = TRUE) / sum(trio_train$poss_est, na.rm = TRUE)
+    trio_train <- trio_train %>%
+      mutate(
+        trio_stop = as.numeric((points_against / poss_est) <= train_def_ppp),
+        trio_key = lapply(uconn_lineup_canon, lineup_trio_keys),
+        event_w = poss_est,
+        stop_w = trio_stop * poss_est
+      )
+    t_base <- weighted_mean_safe(trio_train$trio_stop, trio_train$event_w)
+    if (!is.finite(t_base)) t_base <- 0.5
+    trio_tbl <- trio_train %>%
+      select(trio_key, event_w, stop_w) %>%
+      tidyr::unnest_longer(trio_key, values_to = "trio_key") %>%
+      filter(!is.na(trio_key), nzchar(trio_key)) %>%
+      group_by(trio_key) %>%
+      summarise(
+        events = sum(event_w, na.rm = TRUE),
+        stops = sum(stop_w, na.rm = TRUE),
+        trio_survive = (stops + 120 * t_base) / (events + 120),
+        .groups = "drop"
+      )
+  } else {
+    t_base <- 0.5
+    trio_tbl <- tibble(trio_key = character(), events = numeric(), stops = numeric(), trio_survive = numeric())
+  }
+  trio_baseline[[as.character(g)]] <- t_base
+  trio_models[[as.character(g)]] <- trio_tbl
+}
+
+lineup_unique <- sort(unique(eval_df$lineup))
+pair_keys_map <- setNames(lapply(lineup_unique, lineup_pair_keys_norm), lineup_unique)
+trio_keys_map <- setNames(lapply(lineup_unique, lineup_trio_keys), lineup_unique)
+lineup_key_norm_map <- setNames(canonicalize_lineup_norm(lineup_unique), lineup_unique)
+archetype_balance_map <- setNames(vapply(lineup_unique, compute_lineup_archetype_balance, numeric(1), arche_map = arche_map), lineup_unique)
+leak_map <- setNames(leak_tbl$pr_leak, leak_tbl$lineup)
+
+n_eval <- nrow(eval_df)
+pair_survive <- rep(NA_real_, n_eval)
+prior_pair_events <- rep(NA_real_, n_eval)
+trio_survive <- rep(NA_real_, n_eval)
+prior_trio_possessions <- rep(NA_real_, n_eval)
+pr_leak_use <- rep(NA_real_, n_eval)
+archetype_balance <- rep(NA_real_, n_eval)
+lineup_key_norm_use <- rep(NA_character_, n_eval)
+creation_score <- rep(NA_real_, n_eval)
+
+for (i in seq_len(n_eval)) {
+  g <- as.character(eval_df$holdout_game_id[[i]])
+  l <- as.character(eval_df$lineup[[i]])
+  pk <- pair_keys_map[[l]]
+  tk <- trio_keys_map[[l]]
+
+  p_tbl <- pair_models[[g]]
+  p_base <- pair_baseline[[g]]
+  if (!is.finite(p_base)) p_base <- 0.5
+  if (length(pk) == 0) {
+    pair_survive[[i]] <- p_base
+    prior_pair_events[[i]] <- 0
+  } else {
+    m <- match(pk, p_tbl$pair_key)
+    ev <- p_tbl$events[m]
+    ps <- p_tbl$pair_survive[m]
+    ev[!is.finite(ev)] <- 0
+    ps[!is.finite(ps)] <- p_base
+    total_ev <- sum(ev, na.rm = TRUE)
+    pair_survive[[i]] <- if (is.finite(total_ev) && total_ev > 0) {
+      weighted_mean_safe(ps, ev)
+    } else {
+      mean(ps, na.rm = TRUE)
+    }
+    prior_pair_events[[i]] <- total_ev
+  }
+
+  t_tbl <- trio_models[[g]]
+  t_base <- trio_baseline[[g]]
+  if (!is.finite(t_base)) t_base <- 0.5
+  if (length(tk) == 0) {
+    trio_survive[[i]] <- t_base
+    prior_trio_possessions[[i]] <- 0
+  } else {
+    m2 <- match(tk, t_tbl$trio_key)
+    ev2 <- t_tbl$events[m2]
+    ts <- t_tbl$trio_survive[m2]
+    ev2[!is.finite(ev2)] <- 0
+    ts[!is.finite(ts)] <- t_base
+    total_ev2 <- sum(ev2, na.rm = TRUE)
+    trio_survive[[i]] <- if (is.finite(total_ev2) && total_ev2 > 0) {
+      weighted_mean_safe(ts, ev2)
+    } else {
+      mean(ts, na.rm = TRUE)
+    }
+    prior_trio_possessions[[i]] <- total_ev2
+  }
+
+  # Some holdout lineups have no leak posterior; fall back to the neutral default.
+  pr <- unname(leak_map[l])[[1]]
+  if (!is.finite(pr)) pr <- 0.5
+  pr_leak_use[[i]] <- pr
+  archetype_balance[[i]] <- archetype_balance_map[[l]]
+  lineup_key_norm_use[[i]] <- lineup_key_norm_map[[l]]
+
+  toks <- split_lineup_players_norm(l)
+  vals <- as.numeric(player_creation_map[toks])
+  creation_score[[i]] <- if (length(vals) == 0 || all(!is.finite(vals))) 0.5 else mean(vals[is.finite(vals)], na.rm = TRUE)
+}
+
+opp_component <- function(oppO_z, oppD_z) {
+  plogis(-0.6 * oppO_z + 0.2 * oppD_z)
+}
+
+shot_default_rim_plus_three <- safe_quantile(shot_tbl$rim_plus_three_share, 0.50, default = FLOOR_RIM_PLUS_THREE_SHARE)
+shot_default_non_rim_paint <- safe_quantile(shot_tbl$non_rim_paint_share, 0.50, default = CEILING_NON_RIM_PAINT_SHARE)
+shot_default_fta <- safe_quantile(shot_tbl$fta_per_fga_lineup, 0.50, default = FLOOR_FTA_PER_FGA)
+shot_default_tov <- safe_quantile(shot_tbl$tov_per_fga_lineup, 0.50, default = CEILING_TOV_PER_FGA)
 
 eval_df <- eval_df %>%
   mutate(
-    pred_pr_net_pos_raw = raw_prob_all,
-    pred_pr_net_pos_calibrated = calibrated_prob_all,
-    pred_pr_net_pos_for_decision = pred_pr_net_pos_calibrated,
-    pred_pr_net_pos = pred_pr_net_pos_for_decision,
-    calibration_mode = calibration_mode
+    prior_5man_possessions = prior_possessions,
+    prior_pair_events = prior_pair_events,
+    prior_trio_possessions = prior_trio_possessions,
+    pair_survive = pair_survive,
+    trio_survive = trio_survive,
+    pr_leak = pr_leak_use,
+    archetype_balance = archetype_balance,
+    lineup_key_norm = lineup_key_norm_use,
+    creation_score = creation_score
+  ) %>%
+  left_join(shot_tbl, by = "lineup_key_norm") %>%
+  mutate(
+    rim_plus_three_share = if_else(is.finite(rim_plus_three_share), rim_plus_three_share, shot_default_rim_plus_three),
+    non_rim_paint_share = if_else(is.finite(non_rim_paint_share), non_rim_paint_share, shot_default_non_rim_paint),
+    fta_per_fga_lineup = if_else(is.finite(fta_per_fga_lineup), fta_per_fga_lineup, shot_default_fta),
+    tov_per_fga_lineup = if_else(is.finite(tov_per_fga_lineup), tov_per_fga_lineup, shot_default_tov),
+    p1 = pmax(0, FLOOR_RIM_PLUS_THREE_SHARE - rim_plus_three_share) / FLOOR_RIM_PLUS_THREE_SHARE,
+    p2 = pmax(0, FLOOR_FTA_PER_FGA - fta_per_fga_lineup) / FLOOR_FTA_PER_FGA,
+    p3 = pmax(0, tov_per_fga_lineup - CEILING_TOV_PER_FGA) / CEILING_TOV_PER_FGA,
+    p4 = pmax(0, non_rim_paint_share - CEILING_NON_RIM_PAINT_SHARE) / CEILING_NON_RIM_PAINT_SHARE,
+    shot_diet_score = pmin(pmax(1 - (0.35 * p1 + 0.20 * p2 + 0.25 * p3 + 0.20 * p4), 0), 1),
+    defense_score_neutral = 0.55 * (1 - pr_leak) + 0.30 * pair_survive + 0.10 * trio_survive + 0.05 * archetype_balance,
+    defense_score_neutral = pmin(pmax(defense_score_neutral, 0), 1),
+    opp_adjO_z_ctx = if_else(is.finite(opp_adjO_z_ctx), opp_adjO_z_ctx, 0),
+    opp_adjD_z_ctx = if_else(is.finite(opp_adjD_z_ctx), opp_adjD_z_ctx, 0),
+    defense_score_context = 0.9 * defense_score_neutral + 0.1 * opp_component(opp_adjO_z_ctx, opp_adjD_z_ctx)
   )
-
-message(
-  "Calibration mode: ", calibration_mode,
-  " | status=", calibration_status,
-  " | raw_ece=", round(calib_raw_metrics$weighted_ece_decile[[1]], 4),
-  " | used_ece=", round(
-    if (identical(calibration_mode, "platt")) calib_platt_metrics$weighted_ece_decile[[1]] else
-      calc_prob_metrics(
-        eval_df$pred_pr_net_pos,
-        eval_df$observed_net_positive_num,
-        eval_df$holdout_weight
-      )$weighted_ece_decile[[1]],
-    4
-  )
-)
-
-default_thresholds <- list(
-  play_pr_min = DECISION_PLAY_MORE_PR_NET_MIN,
-  play_net_min = DECISION_PLAY_MORE_NET_PPP_MIN,
-  lean_pr_min = DECISION_LEAN_IN_PR_NET_MIN,
-  lean_net_min = DECISION_LEAN_IN_NET_PPP_MIN,
-  limit_pr_max = DECISION_LIMIT_WATCH_PR_NET_MAX,
-  limit_net_max = DECISION_LIMIT_WATCH_NET_PPP_MAX
-)
 
 tune_threshold_df <- eval_df %>%
   filter(
     holdout_game_id %in% tune_games,
     decision_available,
-    is.finite(pred_pr_net_pos),
-    is.finite(pred_net_ppp_mean),
-    is.finite(prior_possessions),
+    is.finite(defense_score_neutral),
+    is.finite(observed_survive4),
     is.finite(holdout_weight),
     holdout_weight > 0
   )
 
-tune_result <- tune_rule_v2_forward(tune_threshold_df, default_thresholds)
-tuned_thresholds <- tune_result$thresholds
-
-eval_df <- eval_df %>%
-  mutate(
-    Decision = classify_decision(
-      pr = pred_pr_net_pos,
-      net = pred_net_ppp_mean,
-      prior_possessions = prior_possessions,
-      thresholds = tuned_thresholds,
-      decision_available = decision_available
+label_v4 <- function(df, def_floor_t) {
+  df <- df %>%
+    mutate(
+      is_unseen = !(decision_available %in% TRUE) |
+        !is.finite(prior_5man_possessions) |
+        !is.finite(prior_pair_events) |
+        !is.finite(prior_trio_possessions) |
+        (prior_5man_possessions == 0 & prior_pair_events < 20),
+      is_low_sample = !is_unseen & (
+        prior_5man_possessions < 30 |
+          prior_pair_events < 80 |
+          prior_trio_possessions < 40
+      ),
+      defense_floor_pass = !is_unseen & !is_low_sample & is.finite(decision_survive_score_robust) & decision_survive_score_robust >= def_floor_t
     )
+
+  pass_scores <- df$composite_score[df$defense_floor_pass & is.finite(df$composite_score)]
+  q_low <- safe_quantile(pass_scores, 1 / 3, default = NA_real_)
+  q_high <- safe_quantile(pass_scores, 2 / 3, default = NA_real_)
+  if (!is.finite(q_low) || !is.finite(q_high) || q_high < q_low) {
+    q_low <- 0.33
+    q_high <- 0.66
+  }
+
+  df %>%
+    mutate(
+      decision_label = case_when(
+        is_unseen ~ "UNSEEN",
+        is_low_sample ~ "LOW_SAMPLE",
+        !defense_floor_pass ~ "DEF_FLOOR_FAIL",
+        composite_score >= q_high ~ "DEF_FLOOR_PASS_UPSIDE_HIGH",
+        composite_score < q_low ~ "DEF_FLOOR_PASS_UPSIDE_LOW",
+        TRUE ~ "DEF_FLOOR_PASS_UPSIDE_MED"
+      ),
+      Decision = decision_label
+    )
+}
+
+score_v4 <- function(df, w_def, w_off, w_style, alpha_opp, def_floor_q) {
+  out <- df %>%
+    mutate(
+      decision_survive_score_raw = (1 - alpha_opp) * defense_score_neutral + alpha_opp * defense_score_context,
+      decision_survive_score_raw = pmin(pmax(decision_survive_score_raw, 0), 1),
+      offense_upside_raw = 0.60 * zscore_safe(pred_points_per_40) +
+        0.25 * zscore_safe(creation_score) +
+        0.15 * zscore_safe(fta_per_fga_lineup),
+      offense_upside_score = rescale01(offense_upside_raw, default = 0.5),
+      composite_score = w_def * decision_survive_score_raw + w_off * offense_upside_score + w_style * shot_diet_score,
+      composite_score = pmin(pmax(composite_score, 0), 1)
+    )
+
+  grid_vals <- c(-0.5, 0, 0.5)
+  robust <- out$decision_survive_score_raw
+  fragile <- rep(FALSE, nrow(out))
+  for (i in seq_len(nrow(out))) {
+    if (!isTRUE(out$decision_available[[i]])) next
+    o <- out$opp_adjO_z_ctx[[i]]
+    d <- out$opp_adjD_z_ctx[[i]]
+    if (!is.finite(o)) o <- 0
+    if (!is.finite(d)) d <- 0
+    pert <- c()
+    for (do in grid_vals) {
+      for (dd in grid_vals) {
+        s_context <- 0.9 * out$defense_score_neutral[[i]] + 0.1 * opp_component(o + do, d + dd)
+        s <- (1 - alpha_opp) * out$defense_score_neutral[[i]] + alpha_opp * s_context
+        pert <- c(pert, min(max(s, 0), 1))
+      }
+    }
+    if (length(pert) > 0) {
+      robust[[i]] <- min(c(out$decision_survive_score_raw[[i]], pert), na.rm = TRUE)
+    }
+  }
+  out <- out %>%
+    mutate(decision_survive_score_robust = pmin(pmax(robust, 0), 1))
+  def_floor_t <- safe_quantile(
+    out$decision_survive_score_robust[out$decision_available %in% TRUE],
+    def_floor_q,
+    default = 0.50
+  )
+  out <- label_v4(out, def_floor_t)
+  out$opp_fragile_flag <- rep(FALSE, nrow(out))
+
+  for (i in seq_len(nrow(out))) {
+    if (!isTRUE(out$decision_available[[i]])) next
+    o <- out$opp_adjO_z_ctx[[i]]
+    d <- out$opp_adjD_z_ctx[[i]]
+    if (!is.finite(o)) o <- 0
+    if (!is.finite(d)) d <- 0
+    pert_pass <- c()
+    for (do in c(-0.5, 0, 0.5)) {
+      for (dd in c(-0.5, 0, 0.5)) {
+        s_context <- 0.9 * out$defense_score_neutral[[i]] + 0.1 * opp_component(o + do, d + dd)
+        s <- (1 - alpha_opp) * out$defense_score_neutral[[i]] + alpha_opp * s_context
+        pert_pass <- c(pert_pass, s >= def_floor_t)
+      }
+    }
+    base_pass <- isTRUE(out$defense_floor_pass[[i]])
+    out$opp_fragile_flag[[i]] <- if (length(pert_pass) > 0) any(pert_pass != base_pass) else FALSE
+  }
+
+  out <- out %>%
+    mutate(
+      decision_def_ppp_pred = holdout_game_team_def_ppp + (0.5 - decision_survive_score_robust) * 0.30
+    )
+
+  list(df = out, def_floor_t = def_floor_t)
+}
+
+summarize_recommended_metrics <- function(df) {
+  keep <- df$decision_label %in% c(
+    "DEF_FLOOR_PASS_UPSIDE_HIGH",
+    "DEF_FLOOR_PASS_UPSIDE_MED",
+    "DEF_FLOOR_PASS_UPSIDE_LOW"
+  )
+  if (!any(keep, na.rm = TRUE)) {
+    keep <- df$decision_available %in% TRUE
+  }
+  tibble(
+    poss = sum(df$holdout_weight[keep], na.rm = TRUE),
+    weighted_observed_def_ppp = weighted_mean_safe(df$holdout_def_ppp[keep], df$holdout_weight[keep]),
+    weighted_observed_survive4_rate = weighted_mean_safe(df$observed_survive4[keep], df$holdout_weight[keep]),
+    weighted_holdout_raw_net_ppp = weighted_mean_safe(df$holdout_raw_net_ppp[keep], df$holdout_weight[keep])
+  )
+}
+
+forward_eval_games <- if (length(forward_games) > 0) forward_games else split_games
+baseline_scored <- score_v4(
+  eval_df,
+  w_def = 1.0,
+  w_off = 0.0,
+  w_style = 0.0,
+  alpha_opp = 0.10,
+  def_floor_q = 0.35
+)
+baseline_forward <- summarize_recommended_metrics(
+  baseline_scored$df %>% filter(holdout_game_id %in% forward_eval_games)
+)
+
+explored <- 0L
+feasible <- 0L
+best <- NULL
+best_score <- -Inf
+
+for (w_def in V4_W_DEF_GRID) {
+  for (w_off in V4_W_OFF_GRID) {
+    w_style <- 1 - w_def - w_off
+    if (!is.finite(w_style) || w_style < V4_W_STYLE_MIN || w_style > V4_W_STYLE_MAX) next
+    for (alpha_opp in V4_ALPHA_OPP_GRID) {
+      for (def_floor_q in V4_DEF_FLOOR_Q_GRID) {
+        explored <- explored + 1L
+        scored <- score_v4(
+          eval_df,
+          w_def = w_def,
+          w_off = w_off,
+          w_style = w_style,
+          alpha_opp = alpha_opp,
+          def_floor_q = def_floor_q
+        )
+        cand_forward_df <- scored$df %>% filter(holdout_game_id %in% forward_eval_games)
+        cand <- summarize_recommended_metrics(cand_forward_df)
+        if (!is.finite(cand$poss[[1]]) || cand$poss[[1]] < 100) next
+
+        d_def <- as.numeric(cand$weighted_observed_def_ppp[[1]] - baseline_forward$weighted_observed_def_ppp[[1]])
+        d_survive <- as.numeric(cand$weighted_observed_survive4_rate[[1]] - baseline_forward$weighted_observed_survive4_rate[[1]])
+        d_net <- as.numeric(cand$weighted_holdout_raw_net_ppp[[1]] - baseline_forward$weighted_holdout_raw_net_ppp[[1]])
+        if (!is.finite(d_def) || !is.finite(d_survive) || !is.finite(d_net)) next
+        if (d_def > V4_DEF_PPP_DELTA_MAX || d_survive < V4_SURVIVE_DELTA_MIN || d_net < V4_NET_PPP_DELTA_MIN) next
+
+        feasible <- feasible + 1L
+        score <- d_net - d_def + 0.25 * d_survive
+        if (is.finite(score) && score > best_score) {
+          best_score <- score
+          best <- list(
+            w_def = w_def,
+            w_off = w_off,
+            w_style = w_style,
+            alpha_opp = alpha_opp,
+            def_floor_q = def_floor_q,
+            def_floor_t = scored$def_floor_t,
+            d_def = d_def,
+            d_survive = d_survive,
+            d_net = d_net,
+            score = score
+          )
+        }
+      }
+    }
+  }
+}
+
+if (is.null(best)) {
+  message("No feasible V4 parameter set passed guardrails. Falling back to defense-first baseline parameters.")
+  final_scored <- baseline_scored
+  eval_df <- final_scored$df
+  def_floor_t <- final_scored$def_floor_t
+  tune_result <- list(
+    status = "fallback_defense_first_baseline_no_feasible_grid",
+    explored = explored,
+    feasible = feasible,
+    w_def = 1.0,
+    w_off = 0.0,
+    w_style = 0.0,
+    alpha_opp = 0.10,
+    def_floor_q = 0.35,
+    def_floor_t = def_floor_t,
+    delta_weighted_observed_def_ppp = 0.0,
+    delta_weighted_observed_survive4_rate = 0.0,
+    delta_weighted_holdout_raw_net_ppp = 0.0
+  )
+} else {
+  final_scored <- score_v4(
+    eval_df,
+    w_def = best$w_def,
+    w_off = best$w_off,
+    w_style = best$w_style,
+    alpha_opp = best$alpha_opp,
+    def_floor_q = best$def_floor_q
+  )
+  eval_df <- final_scored$df
+  def_floor_t <- final_scored$def_floor_t
+  tune_result <- list(
+    status = "ok",
+    explored = explored,
+    feasible = feasible,
+    w_def = best$w_def,
+    w_off = best$w_off,
+    w_style = best$w_style,
+    alpha_opp = best$alpha_opp,
+    def_floor_q = best$def_floor_q,
+    def_floor_t = def_floor_t,
+    delta_weighted_observed_def_ppp = best$d_def,
+    delta_weighted_observed_survive4_rate = best$d_survive,
+    delta_weighted_holdout_raw_net_ppp = best$d_net
+  )
+}
+
+# Regret tracking (game-level recommendation vs actual and best feasible).
+recommended_by_game <- eval_df %>%
+  filter(
+    decision_available,
+    decision_label %in% c("DEF_FLOOR_PASS_UPSIDE_HIGH", "DEF_FLOOR_PASS_UPSIDE_MED", "DEF_FLOOR_PASS_UPSIDE_LOW")
+  ) %>%
+  group_by(holdout_game_id) %>%
+  arrange(desc(composite_score), desc(prior_5man_possessions), .by_group = TRUE) %>%
+  slice(1) %>%
+  ungroup() %>%
+  transmute(
+    holdout_game_id,
+    recommended_lineup = lineup,
+    recommended_pred_def_ppp = decision_def_ppp_pred
   )
 
+actual_by_game <- eval_df %>%
+  group_by(holdout_game_id) %>%
+  arrange(desc(holdout_possessions), desc(prior_5man_possessions), .by_group = TRUE) %>%
+  slice(1) %>%
+  ungroup() %>%
+  transmute(
+    holdout_game_id,
+    actual_lineup = lineup,
+    actual_pred_def_ppp = decision_def_ppp_pred
+  )
+
+best_feasible_by_game <- eval_df %>%
+  filter(
+    decision_available,
+    decision_label %in% c("DEF_FLOOR_PASS_UPSIDE_HIGH", "DEF_FLOOR_PASS_UPSIDE_MED", "DEF_FLOOR_PASS_UPSIDE_LOW"),
+    prior_5man_possessions >= 30,
+    prior_pair_events >= 80
+  ) %>%
+  group_by(holdout_game_id) %>%
+  summarise(
+    best_feasible_pred_def_ppp = {
+      v <- decision_def_ppp_pred[is.finite(decision_def_ppp_pred)]
+      if (length(v) == 0) NA_real_ else min(v)
+    },
+    .groups = "drop"
+  )
+
+game_regret <- recommended_by_game %>%
+  left_join(actual_by_game, by = "holdout_game_id") %>%
+  left_join(best_feasible_by_game, by = "holdout_game_id") %>%
+  mutate(
+    regret_vs_actual_ppp = actual_pred_def_ppp - recommended_pred_def_ppp,
+    regret_vs_best_feasible_ppp = pmax(recommended_pred_def_ppp - best_feasible_pred_def_ppp, 0)
+  ) %>%
+  select(holdout_game_id, regret_vs_actual_ppp, regret_vs_best_feasible_ppp)
+
+eval_df <- eval_df %>%
+  left_join(game_regret, by = "holdout_game_id")
+
 forward_eval_df <- eval_df %>% filter(holdout_game_id %in% forward_games)
-forward_bucket <- summarise_decision_buckets(forward_eval_df, "Decision")
-forward_play_obs <- forward_bucket %>% filter(Decision == "PLAY MORE") %>% pull(weighted_observed_positive_rate)
-forward_lean_obs <- forward_bucket %>% filter(Decision == "LEAN IN") %>% pull(weighted_observed_positive_rate)
-forward_limit_obs <- forward_bucket %>% filter(Decision == "LIMIT / WATCH") %>% pull(weighted_observed_positive_rate)
-forward_play_real <- forward_bucket %>% filter(Decision == "PLAY MORE") %>% pull(weighted_realized_net_ppp)
-forward_lean_real <- forward_bucket %>% filter(Decision == "LEAN IN") %>% pull(weighted_realized_net_ppp)
-forward_limit_real <- forward_bucket %>% filter(Decision == "LIMIT / WATCH") %>% pull(weighted_realized_net_ppp)
+forward_bucket <- forward_eval_df %>%
+  group_by(Decision) %>%
+  summarise(
+    weighted_composite_score = weighted_mean_safe(composite_score, holdout_weight),
+    weighted_observed_survive4_rate = weighted_mean_safe(observed_survive4, holdout_weight),
+    weighted_observed_leaky_rate = weighted_mean_safe(observed_leaky, holdout_weight),
+    weighted_observed_def_ppp = weighted_mean_safe(holdout_def_ppp, holdout_weight),
+    .groups = "drop"
+  )
+
+forward_bucket_val <- function(label, col) {
+  v <- forward_bucket %>% filter(Decision == label) %>% pull(.data[[col]])
+  if (length(v) == 0) return(NA_real_)
+  as.numeric(v[[1]])
+}
 
 rule_v2_thresholds <- tibble(
   metric = c(
-    "DECISION_RULE_PROB_POSSESSIONS",
-    "DECISION_PLAY_MORE_PR_NET_MIN",
-    "DECISION_PLAY_MORE_NET_PPP_MIN",
-    "DECISION_LEAN_IN_PR_NET_MIN",
-    "DECISION_LEAN_IN_NET_PPP_MIN",
-    "DECISION_LIMIT_WATCH_PR_NET_MAX",
-    "DECISION_LIMIT_WATCH_NET_PPP_MAX",
+    "W_DEF",
+    "W_OFF",
+    "W_STYLE",
+    "ALPHA_OPP",
+    "DEF_FLOOR_QUANTILE",
+    "DEF_FLOOR_T",
+    "FLOOR_RIM_PLUS_THREE_SHARE",
+    "FLOOR_FTA_PER_FGA",
+    "CEILING_TOV_PER_FGA",
+    "CEILING_NON_RIM_PAINT_SHARE",
+    "DELTA_WEIGHTED_OBSERVED_DEF_PPP",
+    "DELTA_WEIGHTED_OBSERVED_SURVIVE4_RATE",
+    "DELTA_WEIGHTED_HOLDOUT_RAW_NET_PPP",
     "TUNING_STATUS",
     "TUNING_GRID_EXPLORED",
     "TUNING_GRID_FEASIBLE",
     "TUNE_GAMES_N",
     "FORWARD_GAMES_N",
-    "CALIBRATION_MODE",
-    "CALIBRATION_STATUS",
-    "CALIBRATION_INTERCEPT",
-    "CALIBRATION_SLOPE",
-    "CALIBRATION_TRAIN_WEIGHTED_ECE_RAW",
-    "CALIBRATION_TRAIN_WEIGHTED_ECE_PLATT",
-    "CALIBRATION_TRAIN_MAX_DECILE_GAP_RAW",
-    "CALIBRATION_TRAIN_MAX_DECILE_GAP_PLATT",
-    "FORWARD_PLAY_MORE_WEIGHTED_OBS_POS_RATE",
-    "FORWARD_LEAN_IN_WEIGHTED_OBS_POS_RATE",
-    "FORWARD_LIMIT_WATCH_WEIGHTED_OBS_POS_RATE",
-    "FORWARD_PLAY_MORE_WEIGHTED_REALIZED_NET_PPP",
-    "FORWARD_LEAN_IN_WEIGHTED_REALIZED_NET_PPP",
-    "FORWARD_LIMIT_WATCH_WEIGHTED_REALIZED_NET_PPP"
+    "MANUAL_DEF_COVERAGE_RATE",
+    "MANUAL_DEF_GAMES_COVERED",
+    "FORWARD_PASS_HIGH_WEIGHTED_SURVIVE4",
+    "FORWARD_DEF_FLOOR_FAIL_WEIGHTED_SURVIVE4",
+    "FORWARD_PASS_HIGH_WEIGHTED_DEF_PPP",
+    "FORWARD_DEF_FLOOR_FAIL_WEIGHTED_DEF_PPP"
   ),
   value = as.character(c(
-    DECISION_RULE_PROB_POSSESSIONS,
-    tuned_thresholds$play_pr_min,
-    tuned_thresholds$play_net_min,
-    tuned_thresholds$lean_pr_min,
-    tuned_thresholds$lean_net_min,
-    tuned_thresholds$limit_pr_max,
-    tuned_thresholds$limit_net_max,
+    tune_result$w_def,
+    tune_result$w_off,
+    tune_result$w_style,
+    tune_result$alpha_opp,
+    tune_result$def_floor_q,
+    tune_result$def_floor_t,
+    FLOOR_RIM_PLUS_THREE_SHARE,
+    FLOOR_FTA_PER_FGA,
+    CEILING_TOV_PER_FGA,
+    CEILING_NON_RIM_PAINT_SHARE,
+    tune_result$delta_weighted_observed_def_ppp,
+    tune_result$delta_weighted_observed_survive4_rate,
+    tune_result$delta_weighted_holdout_raw_net_ppp,
     tune_result$status,
     tune_result$explored,
     tune_result$feasible,
     length(tune_games),
     length(forward_games),
-    calibration_mode,
-    calibration_status,
-    calibration_intercept,
-    calibration_slope,
-    calib_raw_metrics$weighted_ece_decile[[1]],
-    calib_platt_metrics$weighted_ece_decile[[1]],
-    calib_raw_metrics$max_abs_weighted_decile_gap[[1]],
-    calib_platt_metrics$max_abs_weighted_decile_gap[[1]],
-    ifelse(length(forward_play_obs) > 0, forward_play_obs[[1]], NA_real_),
-    ifelse(length(forward_lean_obs) > 0, forward_lean_obs[[1]], NA_real_),
-    ifelse(length(forward_limit_obs) > 0, forward_limit_obs[[1]], NA_real_),
-    ifelse(length(forward_play_real) > 0, forward_play_real[[1]], NA_real_),
-    ifelse(length(forward_lean_real) > 0, forward_lean_real[[1]], NA_real_),
-    ifelse(length(forward_limit_real) > 0, forward_limit_real[[1]], NA_real_)
+    manual_coverage_rate,
+    manual_games_covered,
+    forward_bucket_val("DEF_FLOOR_PASS_UPSIDE_HIGH", "weighted_observed_survive4_rate"),
+    forward_bucket_val("DEF_FLOOR_FAIL", "weighted_observed_survive4_rate"),
+    forward_bucket_val("DEF_FLOOR_PASS_UPSIDE_HIGH", "weighted_observed_def_ppp"),
+    forward_bucket_val("DEF_FLOOR_FAIL", "weighted_observed_def_ppp")
   ))
 )
 
 calibration_model <- tibble(
-  mode = calibration_mode,
-  status = calibration_status,
-  intercept = calibration_intercept,
-  slope = calibration_slope,
-  fallback_shrink = BT_CALIB_FALLBACK_SHRINK,
+  mode = "v4_hybrid_score",
+  status = "not_applicable",
+  intercept = NA_real_,
+  slope = NA_real_,
+  fallback_shrink = NA_real_,
   tune_games_n = length(tune_games),
-  tune_rows_n = nrow(calib_train),
-  tune_weighted_n = sum(calib_train$holdout_weight, na.rm = TRUE),
-  train_weighted_ece_raw = calib_raw_metrics$weighted_ece_decile[[1]],
-  train_weighted_ece_platt = calib_platt_metrics$weighted_ece_decile[[1]],
-  train_max_decile_gap_raw = calib_raw_metrics$max_abs_weighted_decile_gap[[1]],
-  train_max_decile_gap_platt = calib_platt_metrics$max_abs_weighted_decile_gap[[1]],
-  slope_gate_min = BT_CALIB_SLOPE_MIN,
-  slope_gate_max = BT_CALIB_SLOPE_MAX,
-  ece_gate_max = BT_CALIB_MAX_ECE,
-  decile_gap_gate_max = BT_CALIB_MAX_DECILE_GAP
+  tune_rows_n = nrow(tune_threshold_df),
+  tune_weighted_n = sum(tune_threshold_df$holdout_weight, na.rm = TRUE),
+  train_weighted_ece_raw = NA_real_,
+  train_weighted_ece_platt = NA_real_,
+  train_max_decile_gap_raw = NA_real_,
+  train_max_decile_gap_platt = NA_real_,
+  slope_gate_min = NA_real_,
+  slope_gate_max = NA_real_,
+  ece_gate_max = NA_real_,
+  decile_gap_gate_max = NA_real_
 )
 
-rows_df <- eval_df
+rows_df <- eval_df %>%
+  select(
+    -any_of(c(
+      "observed_net_positive",
+      "observed_net_positive_num",
+      "pred_pr_net_pos",
+      "pred_net_ppp_mean",
+      "decision_pred_pr_net_pos",
+      "decision_pred_net_ppp_mean"
+    ))
+  )
 
 bucket_summary <- eval_df %>%
   group_by(Decision) %>%
@@ -1199,47 +1938,59 @@ bucket_summary <- eval_df %>%
     n_game_lineups = n(),
     n_games = n_distinct(holdout_game_id),
     total_holdout_possessions = sum(holdout_weight, na.rm = TRUE),
-    mean_prior_possessions = mean(prior_possessions, na.rm = TRUE),
-
-    mean_pred_pr_net_pos = mean(pred_pr_net_pos, na.rm = TRUE),
-    weighted_pred_pr_net_pos = weighted_mean_safe(pred_pr_net_pos, holdout_weight),
-    observed_positive_rate = mean(observed_net_positive_num, na.rm = TRUE),
-    weighted_observed_positive_rate = weighted_mean_safe(observed_net_positive_num, holdout_weight),
-    net_prob_calibration_gap = observed_positive_rate - mean_pred_pr_net_pos,
-    weighted_net_prob_calibration_gap = weighted_observed_positive_rate - weighted_pred_pr_net_pos,
-
-    mean_pred_net_ppp = mean(pred_net_ppp_mean, na.rm = TRUE),
-    weighted_pred_net_ppp = weighted_mean_safe(pred_net_ppp_mean, holdout_weight),
-    mean_realized_net_ppp = mean(holdout_raw_net_ppp, na.rm = TRUE),
-    weighted_realized_net_ppp = weighted_mean_safe(holdout_raw_net_ppp, holdout_weight),
-    net_value_gap_ppp = weighted_realized_net_ppp - weighted_pred_net_ppp,
-
-    mean_pred_pr_synergy_pos = mean(pr_synergy_pos, na.rm = TRUE),
-    weighted_pred_pr_synergy_pos = weighted_mean_safe(pr_synergy_pos, holdout_weight),
-    mean_pred_synergy_ppp = mean(synergy_mean, na.rm = TRUE),
-    weighted_pred_synergy_ppp = weighted_mean_safe(synergy_mean, holdout_weight),
-
-    weighted_realized_pts_per_40 = weighted_mean_safe(holdout_points_per_40, holdout_weight),
+    mean_prior_5man_possessions = mean(prior_5man_possessions, na.rm = TRUE),
+    mean_prior_pair_events = mean(prior_pair_events, na.rm = TRUE),
+    mean_prior_trio_possessions = mean(prior_trio_possessions, na.rm = TRUE),
+    weighted_survive_score_raw = weighted_mean_safe(decision_survive_score_raw, holdout_weight),
+    weighted_survive_score_robust = weighted_mean_safe(decision_survive_score_robust, holdout_weight),
+    weighted_pred_def_ppp = weighted_mean_safe(decision_def_ppp_pred, holdout_weight),
+    weighted_observed_def_ppp = weighted_mean_safe(holdout_def_ppp, holdout_weight),
+    weighted_observed_survive4_rate = weighted_mean_safe(observed_survive4, holdout_weight),
+    weighted_observed_leaky_rate = weighted_mean_safe(observed_leaky, holdout_weight),
+    weighted_def_ppp_gap_vs_game_baseline = weighted_mean_safe(observed_def_ppp_gap_vs_game_baseline, holdout_weight),
+    weighted_opp_fragile_rate = weighted_mean_safe(as.numeric(opp_fragile_flag), holdout_weight),
+    mean_regret_vs_actual_ppp = mean(regret_vs_actual_ppp, na.rm = TRUE),
+    mean_regret_vs_best_feasible_ppp = mean(regret_vs_best_feasible_ppp, na.rm = TRUE),
     .groups = "drop"
   ) %>%
-  arrange(factor(Decision, levels = c("PLAY MORE", "LEAN IN", "NEUTRAL", "LIMIT / WATCH", "TOO SMALL", "UNSEEN")))
+  arrange(factor(
+    Decision,
+    levels = c(
+      "DEF_FLOOR_PASS_UPSIDE_HIGH",
+      "DEF_FLOOR_PASS_UPSIDE_MED",
+      "DEF_FLOOR_PASS_UPSIDE_LOW",
+      "DEF_FLOOR_FAIL",
+      "LOW_SAMPLE",
+      "UNSEEN"
+    )
+  ))
 
 game_bucket_summary <- eval_df %>%
   group_by(holdout_game_id, holdout_game_file, holdout_game_date, Decision) %>%
   summarise(
     n_lineups = n(),
     holdout_possessions = sum(holdout_weight, na.rm = TRUE),
-    weighted_pred_pr_net_pos = weighted_mean_safe(pred_pr_net_pos, holdout_weight),
-    weighted_observed_positive_rate = weighted_mean_safe(observed_net_positive_num, holdout_weight),
-    weighted_pred_net_ppp = weighted_mean_safe(pred_net_ppp_mean, holdout_weight),
-    weighted_realized_net_ppp = weighted_mean_safe(holdout_raw_net_ppp, holdout_weight),
-    weighted_net_prob_calibration_gap = weighted_observed_positive_rate - weighted_pred_pr_net_pos,
-    net_value_gap_ppp = weighted_realized_net_ppp - weighted_pred_net_ppp,
-    weighted_pred_pr_synergy_pos = weighted_mean_safe(pr_synergy_pos, holdout_weight),
-    weighted_pred_synergy_ppp = weighted_mean_safe(synergy_mean, holdout_weight),
+    weighted_survive_score_raw = weighted_mean_safe(decision_survive_score_raw, holdout_weight),
+    weighted_survive_score_robust = weighted_mean_safe(decision_survive_score_robust, holdout_weight),
+    weighted_pred_def_ppp = weighted_mean_safe(decision_def_ppp_pred, holdout_weight),
+    weighted_observed_def_ppp = weighted_mean_safe(holdout_def_ppp, holdout_weight),
+    weighted_observed_survive4_rate = weighted_mean_safe(observed_survive4, holdout_weight),
+    weighted_observed_leaky_rate = weighted_mean_safe(observed_leaky, holdout_weight),
+    weighted_def_ppp_gap_vs_game_baseline = weighted_mean_safe(observed_def_ppp_gap_vs_game_baseline, holdout_weight),
+    weighted_opp_fragile_rate = weighted_mean_safe(as.numeric(opp_fragile_flag), holdout_weight),
     .groups = "drop"
   ) %>%
-  arrange(holdout_game_id, factor(Decision, levels = c("PLAY MORE", "LEAN IN", "NEUTRAL", "LIMIT / WATCH", "TOO SMALL", "UNSEEN")))
+  arrange(holdout_game_id, factor(
+    Decision,
+    levels = c(
+      "DEF_FLOOR_PASS_UPSIDE_HIGH",
+      "DEF_FLOOR_PASS_UPSIDE_MED",
+      "DEF_FLOOR_PASS_UPSIDE_LOW",
+      "DEF_FLOOR_FAIL",
+      "LOW_SAMPLE",
+      "UNSEEN"
+    )
+  ))
 
 # ---------- Write outputs ----------
 write_csv(rows_df, rows_out_path)
@@ -1249,7 +2000,7 @@ if (nrow(diag_df) > 0) write_csv(diag_df, diag_out_path)
 write_csv(rule_v2_thresholds, rule_v2_thresholds_out_path)
 write_csv(calibration_model, calibration_model_out_path)
 
-message("\nRolling lineup decision backtest complete.")
+message("\nRolling lineup decision backtest complete (V4 hybrid).")
 message("Wrote:")
 message(" - ", normalizePath(rows_out_path))
 message(" - ", normalizePath(bucket_out_path))
@@ -1258,17 +2009,17 @@ if (nrow(diag_df) > 0) message(" - ", normalizePath(diag_out_path))
 message(" - ", normalizePath(rule_v2_thresholds_out_path))
 message(" - ", normalizePath(calibration_model_out_path))
 
-message("\nDecision bucket summary (weighted net calibration + realized outcomes):")
+message("\nDecision bucket summary (V4 hybrid):")
 print(bucket_summary %>%
         select(
           Decision,
           n_game_lineups,
           n_games,
           total_holdout_possessions,
-          weighted_pred_pr_net_pos,
-          weighted_observed_positive_rate,
-          weighted_net_prob_calibration_gap,
-          weighted_pred_net_ppp,
-          weighted_realized_net_ppp,
-          net_value_gap_ppp
+          weighted_survive_score_robust,
+          weighted_pred_def_ppp,
+          weighted_observed_def_ppp,
+          weighted_observed_survive4_rate,
+          weighted_observed_leaky_rate,
+          weighted_def_ppp_gap_vs_game_baseline
         ))

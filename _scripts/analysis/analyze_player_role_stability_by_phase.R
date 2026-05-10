@@ -11,7 +11,7 @@ rm(.local_script_path)
 
 # Track player role stability over three season windows and pair it with
 # a current-form impact check.
-# Output: _outputs/03_players/uconn_player_rsi_three_windows.csv
+# Output: _outputs/03_players/uconn_player_rci_three_windows.csv
 
 library(dplyr)
 library(readr)
@@ -36,7 +36,7 @@ MIN_POSS_PER_PHASE <- 50
 # Exhibition handling (exclude for all calculations)
 EXCLUDE_EXHIBITIONS <- TRUE
 
-# Thresholds for conservative labeling (RSI concentration deltas)
+# Thresholds for conservative labeling (RCI concentration deltas)
 DELTA_SMALL <- 0.02  # within +/- 0.02 treated as "flat"
 DELTA_LARGE <- 0.04  # >= 0.04 treated as meaningful shift
 
@@ -54,10 +54,10 @@ assign_phase <- function(game_id) {
   return(NA_character_)
 }
 
-# Role Stability Index (RSI) per player per phase:
-# RSI = sum over lineups (share_of_player_possessions_in_lineup^2)
-# Higher RSI -> more concentrated usage across lineups (more stable role)
-compute_rsi <- function(df_player_lineup) {
+# Role Concentration Index (RCI) per player per phase:
+# RCI = sum over lineups (share_of_player_possessions_in_lineup^2)
+# Higher RCI -> more concentrated usage across lineups (more stable role)
+compute_rci <- function(df_player_lineup) {
   df_player_lineup %>%
     group_by(player, phase) %>%
     mutate(total_poss = sum(poss)) %>%
@@ -67,7 +67,7 @@ compute_rsi <- function(df_player_lineup) {
     summarise(
       poss_total = first(total_poss),
       lineups_used = n_distinct(lineup_key),
-      rsi = sum(share^2),
+      rci = sum(share^2),
       eff_lineups = if_else(sum(share^2) > 0, 1 / sum(share^2), NA_real_),
       .groups = "drop"
     )
@@ -198,22 +198,22 @@ players_long <- stints %>%
   mutate(player = str_trim(player)) %>%
   filter(player != "", !is.na(player))
 
-# Role stability (RSI) per phase
+# Role concentration (RCI) per phase
 player_lineup_poss <- players_long %>%
   group_by(player, phase, lineup_key) %>%
   summarise(poss = sum(poss_est, na.rm = TRUE), .groups = "drop")
 
-rsi_by_phase <- compute_rsi(player_lineup_poss) %>%
+rci_by_phase <- compute_rci(player_lineup_poss) %>%
   mutate(
-    rsi = if_else(poss_total >= MIN_POSS_PER_PHASE, rsi, NA_real_),
+    rci = if_else(poss_total >= MIN_POSS_PER_PHASE, rci, NA_real_),
     eff_lineups = if_else(poss_total >= MIN_POSS_PER_PHASE, eff_lineups, NA_real_)
   )
 
-rsi_wide <- rsi_by_phase %>%
-  select(player, phase, poss_total, lineups_used, rsi, eff_lineups) %>%
+rci_wide <- rci_by_phase %>%
+  select(player, phase, poss_total, lineups_used, rci, eff_lineups) %>%
   pivot_wider(
     names_from = phase,
-    values_from = c(poss_total, lineups_used, rsi, eff_lineups),
+    values_from = c(poss_total, lineups_used, rci, eff_lineups),
     names_sep = "_"
   )
 
@@ -228,7 +228,7 @@ impact_wide <- impact_phase_summary %>%
     values_from = c(poss_total, net_ppp_mean, pr_pos_weighted),
     names_sep = "_"
   ) %>%
-  # Avoid name collisions with RSI phase possession columns (kept as poss_total_*).
+  # Avoid name collisions with role-phase possession columns (kept as poss_total_*).
   rename_with(
     ~ str_replace(.x, "^poss_total_", "impact_poss_total_"),
     starts_with("poss_total_")
@@ -261,14 +261,14 @@ impact_current <- players_long %>%
   )
 
 # Combine (robust to missing phase columns)
-out <- rsi_wide %>%
+out <- rci_wide %>%
   full_join(impact_wide, by = "player") %>%
   full_join(impact_current, by = "player")
 
 # Ensure expected phase columns exist
 expected_cols <- c(
   paste0("poss_total_",  PHASE1$name), paste0("poss_total_",  PHASE2$name), paste0("poss_total_",  PHASE3$name),
-  paste0("rsi_",         PHASE1$name), paste0("rsi_",         PHASE2$name), paste0("rsi_",         PHASE3$name)
+  paste0("rci_",         PHASE1$name), paste0("rci_",         PHASE2$name), paste0("rci_",         PHASE3$name)
 )
 for (cc in expected_cols) {
   if (!(cc %in% names(out))) out[[cc]] <- NA_real_
@@ -277,21 +277,21 @@ for (cc in expected_cols) {
 # Label role stability (two-phase capable)
 out <- out %>%
   mutate(
-    rsi_phase1  = .data[[paste0("rsi_", PHASE1$name)]],
-    rsi_phase2  = .data[[paste0("rsi_", PHASE2$name)]],
-    rsi_phase3  = .data[[paste0("rsi_", PHASE3$name)]],
+    rci_phase1  = .data[[paste0("rci_", PHASE1$name)]],
+    rci_phase2  = .data[[paste0("rci_", PHASE2$name)]],
+    rci_phase3  = .data[[paste0("rci_", PHASE3$name)]],
     
     poss_phase1 = .data[[paste0("poss_total_", PHASE1$name)]],
     poss_phase2 = .data[[paste0("poss_total_", PHASE2$name)]],
     poss_phase3 = .data[[paste0("poss_total_", PHASE3$name)]],
     
-    delta_rsi_1_to_2 = rsi_phase2 - rsi_phase1,
-    delta_rsi_2_to_3 = rsi_phase3 - rsi_phase2,
+    delta_rci_1_to_2 = rci_phase2 - rci_phase1,
+    delta_rci_2_to_3 = rci_phase3 - rci_phase2,
     
     role_stability_signal = mapply(
       label_role_signal,
       poss_phase1, poss_phase2, poss_phase3,
-      delta_rsi_1_to_2, delta_rsi_2_to_3
+      delta_rci_1_to_2, delta_rci_2_to_3
     )
   )
 
@@ -312,11 +312,11 @@ final <- out %>%
     poss_phase1,
     poss_phase2,
     poss_phase3,
-    rsi_phase1,
-    rsi_phase2,
-    rsi_phase3,
-    delta_rsi_1_to_2,
-    delta_rsi_2_to_3,
+    rci_phase1,
+    rci_phase2,
+    rci_phase3,
+    delta_rci_1_to_2,
+    delta_rci_2_to_3,
     role_stability_signal,
     
     # Impact confirmation (secondary)
@@ -330,7 +330,7 @@ final <- out %>%
 
 # Write output
 OUT_DIR <- "_outputs/03_players"
-OUT_PATH <- file.path(OUT_DIR, "uconn_player_rsi_three_windows.csv")
+OUT_PATH <- file.path(OUT_DIR, "uconn_player_rci_three_windows.csv")
 dir.create(OUT_DIR, recursive = TRUE, showWarnings = FALSE)
 write_csv(final, OUT_PATH)
 

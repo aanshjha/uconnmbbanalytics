@@ -28,6 +28,11 @@ arg_value <- function(key, default = NULL) {
   sub(paste0("^--", key, "="), "", hit[[1]])
 }
 
+arg_bool <- function(key, default = FALSE) {
+  raw <- arg_value(key, if (isTRUE(default)) "true" else "false")
+  tolower(trimws(as.character(raw))) %in% c("1", "true", "t", "yes", "y")
+}
+
 `%||%` <- function(x, y) {
   if (is.null(x) || length(x) == 0) return(y)
   x
@@ -101,7 +106,12 @@ opponents_arg <- arg_value("opponents", "")
 dates_arg <- arg_value("dates", "")
 min_player_events <- suppressWarnings(as.integer(arg_value("min-player-events", "5")))
 min_lineup_events <- suppressWarnings(as.integer(arg_value("min-lineup-events", "8")))
+clean_out <- arg_bool("clean-out", default = TRUE)
 
+if (isTRUE(clean_out) && dir.exists(out_dir)) {
+  stale_paths <- list.files(out_dir, all.files = TRUE, no.. = TRUE, full.names = TRUE)
+  if (length(stale_paths) > 0) unlink(stale_paths, recursive = TRUE, force = TRUE)
+}
 dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
 
 manual_games <- load_manual_games(manual_root)
@@ -1025,7 +1035,8 @@ if (nrow(manifest) == 0) {
 
 write_csv(manifest, file.path(out_dir, "manual_game_scout_manifest.csv"))
 
-for (bucket in unique(manifest$competition_bucket)) {
+expected_buckets <- c("conference", "non_conference")
+for (bucket in expected_buckets) {
   bucket_dir <- file.path(out_dir, bucket)
   dir.create(bucket_dir, recursive = TRUE, showWarnings = FALSE)
 
@@ -1037,6 +1048,7 @@ for (bucket in unique(manifest$competition_bucket)) {
 
   for (opp in unique(bucket_manifest$opponent_slug)) {
     opp_dir <- file.path(bucket_dir, opp)
+    dir.create(opp_dir, recursive = TRUE, showWarnings = FALSE)
     opp_summary <- bucket_manifest %>%
       filter(opponent_slug == opp) %>%
       select(
@@ -1059,6 +1071,29 @@ for (bucket in unique(manifest$competition_bucket)) {
 
     write_csv(opp_player_comparison, file.path(opp_dir, "player_meeting_comparison.csv"))
   }
+}
+
+expected_root_entries <- c("conference", "non_conference", "manual_game_scout_manifest.csv")
+root_entries <- list.files(out_dir, all.files = TRUE, no.. = TRUE, full.names = FALSE)
+missing_root_entries <- setdiff(expected_root_entries, root_entries)
+unexpected_root_entries <- setdiff(root_entries, expected_root_entries)
+if (length(missing_root_entries) > 0 || length(unexpected_root_entries) > 0) {
+  stop(
+    paste(
+      "Manual scout output root contract failed.",
+      if (length(missing_root_entries) > 0) {
+        paste0("Missing: ", paste(sort(missing_root_entries), collapse = ", "))
+      } else {
+        NULL
+      },
+      if (length(unexpected_root_entries) > 0) {
+        paste0("Unexpected: ", paste(sort(unexpected_root_entries), collapse = ", "))
+      } else {
+        NULL
+      }
+    ),
+    call. = FALSE
+  )
 }
 
 message("\nComplete.")

@@ -1,0 +1,5 @@
+entrypoint_id,run_type,command
+coaching_pipeline,required,bash run_coaching_pipeline.sh
+scheme_matchup,optional,Rscript --vanilla _scripts/models/fit_scheme_matchup_model.R
+manual_opponent_scouts,optional,Rscript --vanilla _scripts/analysis/build_manual_game_opponent_scouts.R --clean-out=true
+manual_game_csvs_from_espn,optional,Rscript --vanilla _scripts/analysis/generate_manual_game_csvs_from_espn.R

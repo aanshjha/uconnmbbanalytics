@@ -133,12 +133,12 @@ SCHEME_DATA_SEARCH_ROOTS <- c(
 
 poss_path <- resolve_first_path(
   c("possessions.csv", "uconn_possessions.csv"),
-  required = TRUE,
+  required = FALSE,
   search_roots = SCHEME_DATA_SEARCH_ROOTS
 )
 tags_path <- resolve_first_path(
   c("scheme_tags.csv", "uconn_scheme_tags.csv"),
-  required = TRUE,
+  required = FALSE,
   search_roots = SCHEME_DATA_SEARCH_ROOTS
 )
 events_path <- resolve_first_path(
@@ -170,24 +170,190 @@ dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
 
 fit_path <- file.path(models_dir, "uconn_scheme_matchup_ppp_fit.rds")
 
-possessions <- read_csv(poss_path, show_col_types = FALSE)
-scheme_tags <- read_csv(tags_path, show_col_types = FALSE)
+`%||%` <- function(x, y) {
+  if (is.null(x) || length(x) == 0) return(y)
+  x
+}
 
-events <- if (!is.null(events_path)) read_csv(events_path, show_col_types = FALSE) else NULL
-games <- if (!is.null(games_path)) read_csv(games_path, show_col_types = FALSE) else NULL
-teams <- if (!is.null(teams_path)) read_csv(teams_path, show_col_types = FALSE) else NULL
-lineups <- if (!is.null(lineups_path)) read_csv(lineups_path, show_col_types = FALSE) else NULL
+scheme_output_paths <- list(
+  cell_summary = file.path(out_dir, "uconn_scheme_matchup_cell_summary.csv"),
+  prep_table = file.path(out_dir, "uconn_scheme_matchup_opponent_prep_table.csv"),
+  do_not_run = file.path(out_dir, "uconn_scheme_matchup_do_not_run.csv"),
+  lineup_recommendations = file.path(out_dir, "uconn_scheme_matchup_lineup_recommendations.csv"),
+  calibration = file.path(out_dir, "uconn_scheme_matchup_calibration.csv"),
+  oos_lift = file.path(out_dir, "uconn_scheme_matchup_oos_lift.csv"),
+  meta = file.path(out_dir, "uconn_scheme_matchup_model_meta.csv"),
+  diagnostics = file.path(out_dir, "uconn_scheme_matchup_model_diagnostics.csv")
+)
+
+write_scheme_skip_outputs <- function(status, reason, extra_meta = list()) {
+  empty_cell <- tibble::tibble(
+    coverage = character(),
+    action = character(),
+    train_possessions = integer(),
+    ppp_mean = numeric(),
+    ppp_p05 = numeric(),
+    ppp_p50 = numeric(),
+    ppp_p95 = numeric(),
+    delta_vs_cov_mean = numeric(),
+    delta_vs_cov_p05 = numeric(),
+    delta_vs_cov_p95 = numeric(),
+    pr_above_cov_baseline = numeric(),
+    rank_within_coverage = integer()
+  )
+  empty_lineup <- tibble::tibble(
+    lineup_display = character(),
+    lineup = character(),
+    coverage = character(),
+    recommended_action = character(),
+    expected_ppp_mean = numeric(),
+    expected_ppp_p05 = numeric(),
+    expected_ppp_p95 = numeric(),
+    gain_vs_cov_mean = numeric(),
+    gain_vs_cov_p05 = numeric(),
+    gain_vs_cov_p95 = numeric(),
+    pr_gain_positive = numeric(),
+    train_lineup_possessions = integer()
+  )
+  empty_cal <- tibble::tibble(
+    coverage = character(),
+    action = character(),
+    n = integer(),
+    predicted_ppp = numeric(),
+    actual_ppp = numeric(),
+    calibration_gap = numeric(),
+    bucket_type = character(),
+    bucket_id = character()
+  )
+  empty_lift <- tibble::tibble(
+    coverage = character(),
+    recommended_action = character(),
+    baseline_n = integer(),
+    recommended_n = integer(),
+    baseline_actual_ppp = numeric(),
+    recommended_actual_ppp = numeric(),
+    lift_ppp = numeric(),
+    lift_positive = logical()
+  )
+  empty_diag <- tibble::tibble(
+    accept_stat__ = numeric(),
+    stepsize__ = numeric(),
+    treedepth__ = integer(),
+    n_leapfrog__ = integer(),
+    divergent__ = integer(),
+    energy__ = numeric(),
+    chain = integer()
+  )
+
+  meta <- tibble::tibble(
+    train_n = as.integer(extra_meta$train_n %||% NA_integer_),
+    test_n = as.integer(extra_meta$test_n %||% NA_integer_),
+    split_cut_date = as.character(extra_meta$split_cut_date %||% NA_character_),
+    actions_modeled = as.integer(extra_meta$actions_modeled %||% NA_integer_),
+    coverages_modeled = as.integer(extra_meta$coverages_modeled %||% NA_integer_),
+    lineups_modeled = as.integer(extra_meta$lineups_modeled %||% NA_integer_),
+    off_teams_modeled = as.integer(extra_meta$off_teams_modeled %||% NA_integer_),
+    def_teams_modeled = as.integer(extra_meta$def_teams_modeled %||% NA_integer_),
+    min_action_n = MIN_ACTION_N,
+    min_coverage_n = MIN_COVERAGE_N,
+    min_lineup_n = MIN_LINEUP_N,
+    target_def_team_id = as.character(extra_meta$target_def_team_id %||% TARGET_DEF_TEAM_ID),
+    target_def_team_name = as.character(extra_meta$target_def_team_name %||% TARGET_DEF_TEAM_NAME),
+    reference_lineup = as.character(extra_meta$reference_lineup %||% NA_character_),
+    stan_chains = STAN_CHAINS,
+    stan_iter = STAN_ITER,
+    stan_warmup = STAN_WARMUP,
+    model_cache_path = fit_path,
+    status = as.character(status),
+    reason = as.character(reason),
+    raw_possessions_rows = as.integer(extra_meta$raw_possessions_rows %||% NA_integer_),
+    raw_scheme_tags_rows = as.integer(extra_meta$raw_scheme_tags_rows %||% NA_integer_),
+    modeled_rows_after_filtering = as.integer(extra_meta$modeled_rows_after_filtering %||% NA_integer_),
+    min_modeled_rows_required = 200L,
+    min_train_rows_required = 100L,
+    min_test_rows_required = 50L,
+    generated_at_utc = format(as.POSIXct(Sys.time(), tz = "UTC"), "%Y-%m-%dT%H:%M:%SZ")
+  )
+
+  write_csv(empty_cell, scheme_output_paths$cell_summary)
+  write_csv(empty_cell, scheme_output_paths$prep_table)
+  write_csv(empty_cell, scheme_output_paths$do_not_run)
+  write_csv(empty_lineup, scheme_output_paths$lineup_recommendations)
+  write_csv(empty_cal, scheme_output_paths$calibration)
+  write_csv(empty_lift, scheme_output_paths$oos_lift)
+  write_csv(empty_diag, scheme_output_paths$diagnostics)
+  write_csv(meta, scheme_output_paths$meta)
+}
+
+soft_skip_scheme <- function(status, reason, extra_meta = list()) {
+  write_scheme_skip_outputs(status = status, reason = reason, extra_meta = extra_meta)
+  message("Scheme matchup soft-skip: ", reason)
+  message("Wrote skip-status outputs to: ", normalizePath(out_dir))
+  quit(save = "no", status = 0)
+}
+
+safe_read_csv <- function(path, label) {
+  if (is.null(path) || !nzchar(path) || !file.exists(path)) return(NULL)
+  tryCatch(
+    read_csv(path, show_col_types = FALSE),
+    error = function(e) {
+      soft_skip_scheme(
+        status = "skipped_input_read_error",
+        reason = paste0("Failed reading ", label, ": ", conditionMessage(e)),
+        extra_meta = list(
+          raw_possessions_rows = NA_integer_,
+          raw_scheme_tags_rows = NA_integer_
+        )
+      )
+      NULL
+    }
+  )
+}
+
+if (is.null(poss_path) || !nzchar(poss_path)) {
+  soft_skip_scheme(
+    status = "skipped_missing_input_file",
+    reason = "Missing possessions.csv (or uconn_possessions.csv) in scheme data search roots."
+  )
+}
+if (is.null(tags_path) || !nzchar(tags_path)) {
+  soft_skip_scheme(
+    status = "skipped_missing_input_file",
+    reason = "Missing scheme_tags.csv (or uconn_scheme_tags.csv) in scheme data search roots."
+  )
+}
+
+possessions <- safe_read_csv(poss_path, "possessions")
+scheme_tags <- safe_read_csv(tags_path, "scheme_tags")
+events <- safe_read_csv(events_path, "events")
+games <- safe_read_csv(games_path, "games")
+teams <- safe_read_csv(teams_path, "teams")
+lineups <- safe_read_csv(lineups_path, "lineups")
 
 required_poss <- c("possession_id", "game_id", "offense_team_id", "defense_team_id", "points_scored")
 missing_poss <- setdiff(required_poss, names(possessions))
 if (length(missing_poss) > 0) {
-  stop("possessions file missing required columns: ", paste(missing_poss, collapse = ", "))
+  soft_skip_scheme(
+    status = "skipped_missing_input_columns",
+    reason = paste0("possessions file missing required columns: ", paste(missing_poss, collapse = ", ")),
+    extra_meta = list(
+      raw_possessions_rows = nrow(possessions),
+      raw_scheme_tags_rows = nrow(scheme_tags)
+    )
+  )
 }
 
 required_tags <- c("offense_action", "defense_coverage")
 missing_tags <- setdiff(required_tags, names(scheme_tags))
 if (length(missing_tags) > 0) {
-  stop("scheme_tags file missing required columns: ", paste(missing_tags, collapse = ", "))
+  soft_skip_scheme(
+    status = "skipped_missing_input_columns",
+    reason = paste0("scheme_tags file missing required columns: ", paste(missing_tags, collapse = ", ")),
+    extra_meta = list(
+      raw_possessions_rows = nrow(possessions),
+      raw_scheme_tags_rows = nrow(scheme_tags)
+    )
+  )
 }
 
 if (!("possession_id" %in% names(scheme_tags))) {
@@ -195,7 +361,14 @@ if (!("possession_id" %in% names(scheme_tags))) {
     scheme_tags <- scheme_tags %>%
       left_join(events %>% select(event_id, possession_id), by = "event_id")
   } else {
-    stop("scheme_tags must include possession_id (or event_id with events mapping).")
+    soft_skip_scheme(
+      status = "skipped_missing_input_columns",
+      reason = "scheme_tags must include possession_id (or event_id with events mapping).",
+      extra_meta = list(
+        raw_possessions_rows = nrow(possessions),
+        raw_scheme_tags_rows = nrow(scheme_tags)
+      )
+    )
   }
 }
 
@@ -249,7 +422,14 @@ if (is.null(game_date_df)) {
 }
 
 if (is.null(game_date_df)) {
-  stop("Cannot time-split by date. Provide games.csv with date/game_date or possessions date column.")
+  soft_skip_scheme(
+    status = "skipped_unusable_time_split",
+    reason = "Cannot time-split by date. Provide games.csv with date/game_date or possessions date column.",
+    extra_meta = list(
+      raw_possessions_rows = nrow(possessions),
+      raw_scheme_tags_rows = nrow(scheme_tags)
+    )
+  )
 }
 
 # Clean and dedupe scheme tags
@@ -306,13 +486,29 @@ model_df <- possessions %>%
   )
 
 if (nrow(model_df) < 200) {
-  stop("Too few modeled possessions after filtering (N = ", nrow(model_df), ").")
+  soft_skip_scheme(
+    status = "skipped_insufficient_modeled_rows",
+    reason = paste0("Too few modeled possessions after filtering (N = ", nrow(model_df), ")."),
+    extra_meta = list(
+      raw_possessions_rows = nrow(possessions),
+      raw_scheme_tags_rows = nrow(scheme_tags),
+      modeled_rows_after_filtering = nrow(model_df)
+    )
+  )
 }
 
 # Date split (no leakage)
 all_dates <- sort(unique(model_df$game_date))
 if (length(all_dates) < 2) {
-  stop("Need at least 2 distinct dates to perform time split.")
+  soft_skip_scheme(
+    status = "skipped_unusable_time_split",
+    reason = "Need at least 2 distinct dates to perform time split.",
+    extra_meta = list(
+      raw_possessions_rows = nrow(possessions),
+      raw_scheme_tags_rows = nrow(scheme_tags),
+      modeled_rows_after_filtering = nrow(model_df)
+    )
+  )
 }
 
 split_idx <- floor(length(all_dates) * 0.8)
@@ -323,9 +519,23 @@ train <- model_df %>% filter(game_date <= cut_date)
 test <- model_df %>% filter(game_date > cut_date)
 
 if (nrow(train) < 100 || nrow(test) < 50) {
-  stop(
-    "Time split produced too-small train/test sets. ",
-    "Train N=", nrow(train), ", Test N=", nrow(test), "."
+  soft_skip_scheme(
+    status = "skipped_unusable_time_split",
+    reason = paste0(
+      "Time split produced too-small train/test sets. Train N=",
+      nrow(train),
+      ", Test N=",
+      nrow(test),
+      "."
+    ),
+    extra_meta = list(
+      raw_possessions_rows = nrow(possessions),
+      raw_scheme_tags_rows = nrow(scheme_tags),
+      modeled_rows_after_filtering = nrow(model_df),
+      train_n = nrow(train),
+      test_n = nrow(test),
+      split_cut_date = as.character(cut_date)
+    )
   )
 }
 
@@ -801,11 +1011,19 @@ oos_lift <- bind_rows(lift_by_coverage, lift_overall)
 
 # Model diagnostics + metadata
 sampler_params <- tryCatch(rstan::get_sampler_params(fit, inc_warmup = FALSE), error = function(e) NULL)
+diag_df <- tibble::tibble(
+  accept_stat__ = numeric(),
+  stepsize__ = numeric(),
+  treedepth__ = integer(),
+  n_leapfrog__ = integer(),
+  divergent__ = integer(),
+  energy__ = numeric(),
+  chain = integer()
+)
 if (!is.null(sampler_params)) {
   diag_df <- bind_rows(lapply(seq_along(sampler_params), function(i) {
     as_tibble(sampler_params[[i]]) %>% mutate(chain = i)
   }))
-  write_csv(diag_df, file.path(out_dir, "uconn_scheme_matchup_model_diagnostics.csv"))
 }
 
 team_name_ref <- def_ref
@@ -832,17 +1050,27 @@ meta <- tibble(
   stan_chains = STAN_CHAINS,
   stan_iter = STAN_ITER,
   stan_warmup = STAN_WARMUP,
-  model_cache_path = fit_path
+  model_cache_path = fit_path,
+  status = "ok",
+  reason = "",
+  raw_possessions_rows = nrow(possessions),
+  raw_scheme_tags_rows = nrow(scheme_tags),
+  modeled_rows_after_filtering = nrow(model_df),
+  min_modeled_rows_required = 200L,
+  min_train_rows_required = 100L,
+  min_test_rows_required = 50L,
+  generated_at_utc = format(as.POSIXct(Sys.time(), tz = "UTC"), "%Y-%m-%dT%H:%M:%SZ")
 )
 
 # Write outputs
-write_csv(cell_summary, file.path(out_dir, "uconn_scheme_matchup_cell_summary.csv"))
-write_csv(prep_table, file.path(out_dir, "uconn_scheme_matchup_opponent_prep_table.csv"))
-write_csv(do_not_run, file.path(out_dir, "uconn_scheme_matchup_do_not_run.csv"))
-write_csv(lineup_recommendations, file.path(out_dir, "uconn_scheme_matchup_lineup_recommendations.csv"))
-write_csv(calibration_out, file.path(out_dir, "uconn_scheme_matchup_calibration.csv"))
-write_csv(oos_lift, file.path(out_dir, "uconn_scheme_matchup_oos_lift.csv"))
-write_csv(meta, file.path(out_dir, "uconn_scheme_matchup_model_meta.csv"))
+write_csv(cell_summary, scheme_output_paths$cell_summary)
+write_csv(prep_table, scheme_output_paths$prep_table)
+write_csv(do_not_run, scheme_output_paths$do_not_run)
+write_csv(lineup_recommendations, scheme_output_paths$lineup_recommendations)
+write_csv(calibration_out, scheme_output_paths$calibration)
+write_csv(oos_lift, scheme_output_paths$oos_lift)
+write_csv(meta, scheme_output_paths$meta)
+write_csv(diag_df, scheme_output_paths$diagnostics)
 
 message("Done. Wrote scheme matchup outputs to: ", normalizePath(out_dir))
 message(" - uconn_scheme_matchup_cell_summary.csv")
@@ -852,7 +1080,5 @@ message(" - uconn_scheme_matchup_lineup_recommendations.csv")
 message(" - uconn_scheme_matchup_calibration.csv")
 message(" - uconn_scheme_matchup_oos_lift.csv")
 message(" - uconn_scheme_matchup_model_meta.csv")
-if (!is.null(sampler_params)) {
-  message(" - uconn_scheme_matchup_model_diagnostics.csv")
-}
+message(" - uconn_scheme_matchup_model_diagnostics.csv")
 message("Model cache: ", normalizePath(fit_path))
