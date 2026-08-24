@@ -23,6 +23,7 @@ _outputs/
 # Heavy generated model artifacts (reproducible from scripts + data)
 _models/*.rds
 _models/backtests/
+_models/.Rapp.history
 
 # Local database/cache noise
 *.db
