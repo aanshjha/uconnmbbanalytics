@@ -10,7 +10,8 @@ Usage: bash run_checks.sh [--fixtures-only | --require-real-data]
 Check shell, Python, R, Stan, and dashboard JavaScript syntax; run the Python
 and R regression suites. If private source inputs are present, rebuild the
 current workflow in a temporary directory and verify its reconciliation and
-evaluation outputs without changing the project's saved data or human ledger.
+evaluation outputs, plus a conservative lineup-evidence audit, without changing
+the project's saved data or human ledger.
 
   --fixtures-only     Run syntax and fixture checks without the real-data rebuild.
   --require-real-data Fail if the private inputs needed for the rebuild are absent.
@@ -87,6 +88,8 @@ else
     cp -R _data/03_manual_game_csv/. "$scratch_dir/_data/03_manual_game_csv/"
     printf '\nRebuilding from cached private source data in an isolated directory...\n'
     (cd "$scratch_dir" && bash run_coaching_pipeline.sh)
+    python3 "$scratch_dir/_scripts/ops/audit_lineup_evidence.py" \
+      --root "$scratch_dir" --output-dir "$scratch_dir/_outputs/09_lineup_source_audit"
     python3 - "$scratch_dir" <<'PY'
 import csv
 import json
@@ -98,6 +101,7 @@ root = Path(sys.argv[1])
 summary = json.loads((root / '_outputs/00_qc/reconciliation_summary.json').read_text())
 evaluation = json.loads((root / '_outputs/08_reconciled_evaluation/pregame_manifest.json').read_text())
 pilot = json.loads((root / '_outputs/08_staff_pilot/human_pilot_summary.json').read_text())
+lineup = json.loads((root / '_outputs/09_lineup_source_audit/audit_summary.json').read_text())
 assert summary['games'] > 0 and summary['canonical_source_events'] > 0
 assert summary['score_reconciled_games'] == summary['games']
 assert summary['event_stats_reconciled_games'] == summary['games']
@@ -106,9 +110,14 @@ assert summary['stat_mismatches'] == 0
 assert evaluation['test_games'] > 0
 assert all(math.isfinite(row['mae_points']) for row in evaluation['metrics'])
 assert pilot['completed_sessions'] == 0  # The isolated run must not invent human results.
+assert lineup['games'] == summary['games']
+assert lineup['source_events'] == summary['canonical_source_events']
+assert lineup['total_source_points'] == lineup['points_with_source_consistent_lineups'] + lineup['points_excluded_from_lineups']
+assert lineup['historically_imputed_possession_rows'] is None  # Prior private repair reports are intentionally not copied.
+assert lineup['lineup_models_released'] is False
 with (root / '_data/02_derived_inputs/reconciled_games.csv').open(newline='') as handle:
     assert len(list(csv.DictReader(handle))) == summary['games']
-print(f"Real-data rebuild verified: {summary['games']} games, {summary['stat_checks']} stat checks, {evaluation['test_games']} forecast tests")
+print(f"Real-data rebuild verified: {summary['games']} games, {summary['stat_checks']} stat checks, {evaluation['test_games']} forecast tests; lineup evidence remains unreleased")
 PY
   fi
 fi

@@ -27,6 +27,7 @@ This guide separates the current source-backed workflow from retained model rese
 | `_outputs/00_qc/` | Reconciliation reports and exclusions | Current checks |
 | `_outputs/08_reconciled_evaluation/` | Matched pregame forecasts and errors | Current evaluation |
 | `_outputs/08_staff_pilot/` | Evidence packets, assignment, and actual trial ledger | Current pilot |
+| `_outputs/09_lineup_source_audit/` | Source-consistent five-player and bounded possession evidence, exclusions, and old-stint discrepancies | Diagnostic; not model input |
 | `_outputs/01_*` through `_outputs/07_*` | Previous lineup, player, defense, and scouting outputs | Historical, marked locally with `HISTORICAL_UNVALIDATED.txt`; not current validation evidence |
 | `staff-dashboard/` | Separate staff website checkout | Local presentation project; see its guide |
 | `Notes/` | Course notes and methods background | Reference material |
@@ -45,6 +46,8 @@ The sequence is:
 2. `_scripts/analysis/evaluate_pregame_defense.py` tests the same held-out games against two baselines.
 3. `_scripts/analysis/postgame_defensive_review.py build --game-id 401812793` builds the Florida demonstration packet.
 4. `_scripts/analysis/postgame_defensive_review.py summary` summarizes actual recorded human sessions.
+
+Separately, `python3 _scripts/ops/audit_lineup_evidence.py` inventories source-linked lineup states, bounded possession sequences, and exclusions without changing the current workflow or treating the incomplete reconstruction as a released lineup dataset.
 
 `run_everything.sh` is a compatibility alias for this same workflow. Pass `--fetch` to retrieve missing source snapshots or `--refresh` to replace cached snapshots explicitly. Neither command starts a human trial. Direct legacy R analysis, modeling, pipeline, and batch-run entrypoints are guarded in the shared bootstrap; the source CSV generator, maintenance tools, and read-only historical Shiny view retain their existing paths.
 

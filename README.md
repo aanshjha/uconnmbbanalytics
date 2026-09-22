@@ -23,9 +23,9 @@ The local input CSVs and source snapshots are private working files and remain g
 - **32 games:** final scores and all **640 team-stat comparisons** match source events and ESPN box totals.
 - **14,589 canonical source events:** exact string IDs, source URLs, retrieval timestamps, and content hashes.
 - **1,032 redundant manual rows:** excluded from the canonical data; originals are preserved.
-- **Eight covered games have incorrect core-stint point totals.** Two exhibition games have no matching source snapshot. Lineup and possession attribution remains unverified, so lineup recommendations are not released.
+- **Eight covered games have incorrect core-stint point totals.** A source-event audit found 48 stint rows with definite point discrepancies and matched 106 historical possession fills to retained repair reports. It excludes ambiguous lineup events and produces only bounded possession evidence, so lineup recommendations remain withheld. Two exhibition games have no matching source snapshot.
 - **27 pregame test games:** the expanding-mean baseline has 8.599-point MAE; ridge has 8.679; last-three mean has 11.309. The model does not beat the expanding mean.
-- **Staff trial prepared:** a Florida demonstration review, Butler baseline packet, DePaul report packet, and a timing/usefulness recorder. The assigned human trial has not started; staff time savings and usefulness remain unmeasured.
+- **Staff trial packets prepared:** a Florida demonstration review, Butler baseline packet, DePaul report packet, and a timing/usefulness recorder. Consult the human-session summary for completed reviews; packet preparation alone measures no staff benefit.
 
 The forecast target is opponent final points, which includes pace, game length and opponent strength. It does not validate lineup effects or defensive efficiency. Historical data were retrieved retrospectively; original feed vintages are unavailable. Intermediate scoreboard inconsistencies are reported separately from reconciled final totals.
 
@@ -40,6 +40,7 @@ The forecast target is opponent final points, which includes pace, game length a
 | Staff trial instructions | [Pilot guide](docs/STAFF_PILOT.md) |
 | Canonical game/event CSVs | `_data/02_derived_inputs/reconciled_games.csv`, `reconciled_events.csv` |
 | Source checks and core exclusions | `_outputs/00_qc/` |
+| Conservative lineup and possession evidence audit | `_outputs/09_lineup_source_audit/` |
 | Forecasts, metrics and fold provenance | `_outputs/08_reconciled_evaluation/` |
 | Demonstration review and evidence | `_outputs/08_staff_pilot/401812793/defensive_review.html` |
 | Assigned trial and packet locations | `_outputs/08_staff_pilot/trial_assignment.json` |
