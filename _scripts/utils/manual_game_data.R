@@ -33,9 +33,11 @@ ensure_manual_csv_dirs <- function(root_dir = manual_csv_root_dir()) {
 extract_matchup_part <- function(matchup_header, uconn_is_home) {
   parts <- stringr::str_split(as.character(matchup_header), "\\s*-vs-\\s*", n = 2)[[1]]
   if (length(parts) != 2) return(NA_character_)
-
-  is_home <- as.logical(uconn_is_home)
-  if (isTRUE(is_home)) parts[[1]] else parts[[2]]
+  # PDF ordering and nominal home/away labels disagree at neutral sites.
+  # Select the opponent by identity, never by its position in the header.
+  is_uconn <- stringr::str_detect(parts, stringr::regex("^\\s*(UConn|Connecticut)\\b", ignore_case = TRUE))
+  if (sum(is_uconn, na.rm = TRUE) != 1L) return(NA_character_)
+  parts[!is_uconn][[1]]
 }
 
 infer_competition_bucket <- function(game_meta) {
@@ -53,6 +55,9 @@ infer_competition_bucket <- function(game_meta) {
     uconn_is_home = game_meta$uconn_is_home[[1]]
   )
   if (is.na(opponent_side) || opponent_side == "") return(NA_character_)
+
+  # A bare opponent name carries no conference evidence.
+  if (!stringr::str_detect(opponent_side, "\\([^)]*[A-Za-z][^)]*\\)")) return(NA_character_)
 
   if (stringr::str_detect(opponent_side, stringr::regex("Big East", ignore_case = TRUE))) {
     "conference"
@@ -87,7 +92,7 @@ manual_csv_output_path <- function(game_meta, root_dir = manual_csv_root_dir()) 
 
 manual_csv_bucket_from_path <- function(path, root_dir = manual_csv_root_dir()) {
   norm_path <- normalizePath(path, winslash = "/", mustWork = FALSE)
-  dirs <- manual_csv_bucket_dirs(root_dir)
+  dirs <- c(manual_csv_bucket_dirs(root_dir), conference_tournament = file.path(root_dir, "_bet"))
 
   for (bucket in names(dirs)) {
     bucket_dir <- paste0(normalizePath(dirs[[bucket]], winslash = "/", mustWork = FALSE), "/")
@@ -98,7 +103,7 @@ manual_csv_bucket_from_path <- function(path, root_dir = manual_csv_root_dir()) 
 }
 
 list_manual_game_csv_files <- function(root_dir = manual_csv_root_dir()) {
-  dirs <- unname(manual_csv_bucket_dirs(root_dir))
+  dirs <- c(unname(manual_csv_bucket_dirs(root_dir)), file.path(root_dir, "_bet"))
   files <- unlist(
     lapply(dirs, function(dir_path) {
       if (!dir.exists(dir_path)) return(character())
@@ -108,7 +113,43 @@ list_manual_game_csv_files <- function(root_dir = manual_csv_root_dir()) {
   )
 
   files <- files[basename(files) != "_espn_generation_summary.csv"]
-  unique(files[file.exists(files)])
+  sort(unique(files[file.exists(files)]))
+}
+
+# Source IDs are identifiers, not floating point values. An 18-digit ESPN play
+# ID cannot be reconstructed after a CSV reader has rounded it to a double.
+deduplicate_source_events <- function(
+  events,
+  keys = c("game_id", "play_id"),
+  provenance_cols = c("source_path", "source_file", "source_bucket", "competition_bucket"),
+  label = "source events"
+) {
+  missing <- setdiff(keys, names(events))
+  if (length(missing)) stop(label, " missing key columns: ", paste(missing, collapse = ", "), call. = FALSE)
+  for (key in keys) {
+    if (is.numeric(events[[key]]) && any(abs(events[[key]]) >= 2^53, na.rm = TRUE)) {
+      stop(label, " has unsafe numeric ", key, "; reread the original IDs as character.", call. = FALSE)
+    }
+    events[[key]] <- trimws(as.character(events[[key]]))
+    if (any(is.na(events[[key]]) | !nzchar(events[[key]]))) {
+      stop(label, " has missing ", key, "; source repair is required.", call. = FALSE)
+    }
+  }
+
+  duplicate_rows <- duplicated(events[keys]) | duplicated(events[keys], fromLast = TRUE)
+  payload_cols <- setdiff(names(events), provenance_cols)
+  duplicate_payloads <- unique(as.data.frame(events[duplicate_rows, payload_cols, drop = FALSE]))
+  conflicting <- duplicated(duplicate_payloads[keys]) | duplicated(duplicate_payloads[keys], fromLast = TRUE)
+  if (any(conflicting)) {
+    bad_keys <- unique(duplicate_payloads[conflicting, keys, drop = FALSE])
+    display <- apply(utils::head(bad_keys, 5), 1, paste, collapse = "/")
+    stop(label, " has conflicting duplicate source keys: ", paste(display, collapse = ", "),
+      "; no rows were selected. Reconcile these copies against source events.", call. = FALSE)
+  }
+  keep <- !duplicated(events[keys])
+  out <- events[keep, , drop = FALSE]
+  attr(out, "duplicate_rows_removed") <- sum(!keep)
+  out
 }
 
 load_manual_games <- function(root_dir = manual_csv_root_dir()) {
@@ -118,7 +159,11 @@ load_manual_games <- function(root_dir = manual_csv_root_dir()) {
   }
 
   manual_games <- dplyr::bind_rows(lapply(manual_files, function(path) {
-    tbl <- readr::read_csv(path, show_col_types = FALSE)
+    tbl <- readr::read_csv(path, show_col_types = FALSE, col_types = readr::cols(
+      game_id = readr::col_character(), play_id = readr::col_character(),
+      team_id = readr::col_character(), athlete_id_1 = readr::col_character(),
+      athlete_id_2 = readr::col_character(), clock_display_value = readr::col_character()
+    ))
     dplyr::mutate(
       tbl,
       source_path = path,
@@ -143,5 +188,22 @@ load_manual_games <- function(root_dir = manual_csv_root_dir()) {
     manual_games$source_bucket
   )
 
-  manual_games
+  # Ignore folder labels when comparing event payloads, but surface every
+  # classification disagreement instead of making the first file authoritative.
+  provenance <- manual_games %>%
+    dplyr::group_by(game_id, play_id) %>%
+    dplyr::summarise(
+      source_paths = paste(sort(unique(source_path)), collapse = " | "),
+      source_buckets = paste(sort(unique(source_bucket)), collapse = " | "),
+      source_copy_count = dplyr::n(),
+      source_bucket_conflict = dplyr::n_distinct(c(source_bucket, competition_bucket), na.rm = TRUE) > 1,
+      .groups = "drop"
+    )
+  out <- deduplicate_source_events(manual_games, label = "Manual-game CSVs")
+  duplicate_rows_removed <- attr(out, "duplicate_rows_removed")
+  out <- dplyr::left_join(out, provenance, by = c("game_id", "play_id"))
+  out$competition_bucket[out$source_bucket_conflict] <- NA_character_
+  attr(out, "duplicate_rows_removed") <- duplicate_rows_removed
+  attr(out, "duplicate_report") <- provenance[provenance$source_copy_count > 1, , drop = FALSE]
+  out
 }

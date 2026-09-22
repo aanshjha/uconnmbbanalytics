@@ -144,13 +144,9 @@ init_team_lineup <- function(rosters, team_id) {
   starters <- rr %>% filter(starter %in% TRUE) %>% pull(full_name)
   starters <- unique(starters)
 
-  if (length(starters) < 5) {
-    fill <- rr %>% pull(full_name)
-    fill <- fill[!fill %in% starters]
-    starters <- c(starters, fill)
-  }
-
-  unique(starters)[seq_len(min(5, length(unique(starters))))]
+  # Roster order and later participation cannot establish the starting five.
+  if (length(starters) != 5L) return(character())
+  starters
 }
 
 extract_player_from_play <- function(play_type, txt) {
@@ -193,29 +189,13 @@ build_lineup_context <- function(pbp, rosters) {
   }
 
   lineups <- list()
+  lineup_trusted <- list()
   roster_map <- list()
   for (tid in team_ids) {
     lineups[[tid]] <- init_team_lineup(rosters2, tid)
+    lineup_trusted[[tid]] <- length(lineups[[tid]]) == 5L
     roster_map[[tid]] <- rosters2 %>% filter(team_id == !!tid) %>% distinct(name_key, full_name, .keep_all = TRUE)
 
-    # Fallback when roster endpoint is missing or starter flags are unavailable.
-    if (length(lineups[[tid]]) < 5) {
-      sub_out <- pbp %>%
-        filter(as.character(team_id) == tid, type_text == "Substitution", str_detect(text, "subbing out for")) %>%
-        mutate(raw = str_match(text, "^(.*?)\\s+subbing out for\\s+.*$")[, 2]) %>%
-        pull(raw)
-      sub_out <- sub_out[!is.na(sub_out) & sub_out != ""]
-      sub_out <- vapply(sub_out, function(z) resolve_player_from_roster(z, roster_map[[tid]]), character(1))
-
-      from_plays <- pbp %>%
-        filter(as.character(team_id) == tid) %>%
-        mutate(p = mapply(extract_player_from_play, type_text, text, USE.NAMES = FALSE)) %>%
-        pull(p)
-      from_plays <- from_plays[!is.na(from_plays) & from_plays != ""]
-
-      candidates <- unique(c(lineups[[tid]], sub_out, from_plays))
-      lineups[[tid]] <- candidates[seq_len(min(5, length(candidates)))]
-    }
   }
 
   update_sub <- function(row) {
@@ -228,18 +208,18 @@ build_lineup_context <- function(pbp, rosters) {
     if (str_detect(txt, "subbing out for")) {
       raw <- str_match(txt, "^(.*?)\\s+subbing out for\\s+.*$")[, 2]
       pnm <- resolve_player_from_roster(raw, roster_map[[tid]])
+      if (is.na(pnm) || !(pnm %in% lineups[[tid]])) lineup_trusted[[tid]] <<- FALSE
       lineups[[tid]] <<- setdiff(lineups[[tid]], pnm)
     }
 
     if (str_detect(txt, "subbing in for")) {
       raw <- str_match(txt, "^(.*?)\\s+subbing in for\\s+.*$")[, 2]
       pnm <- resolve_player_from_roster(raw, roster_map[[tid]])
+      if (is.na(pnm) || !(pnm %in% roster_map[[tid]]$full_name) || pnm %in% lineups[[tid]]) {
+        lineup_trusted[[tid]] <<- FALSE
+      }
       if (!(pnm %in% lineups[[tid]])) {
         lineups[[tid]] <<- c(lineups[[tid]], pnm)
-      }
-      # If lineup overflows from unresolved sub-out rows, keep most recent five.
-      if (length(lineups[[tid]]) > 5) {
-        lineups[[tid]] <<- tail(lineups[[tid]], 5)
       }
     }
   }
@@ -251,7 +231,16 @@ build_lineup_context <- function(pbp, rosters) {
     }
     def_tid <- setdiff(names(lineups), off_tid)
     def_tid <- if (length(def_tid) == 0) NA_character_ else def_tid[[1]]
-    c(collapse_lineup(lineups[[off_tid]]), collapse_lineup(lineups[[def_tid]]))
+    # An overflow or incomplete lineup at an event is not resolved by dropping
+    # arbitrary players. Keep that team unavailable until source repair.
+    for (tid in c(off_tid, def_tid)) {
+      if (!is.na(tid) && length(lineups[[tid]]) != 5L) lineup_trusted[[tid]] <<- FALSE
+    }
+    verified_lineup <- function(tid) {
+      if (is.na(tid) || !isTRUE(lineup_trusted[[tid]])) return(NA_character_)
+      collapse_lineup(lineups[[tid]])
+    }
+    c(verified_lineup(off_tid), verified_lineup(def_tid))
   }
 
   list(update_sub = update_sub, get_lineups_for_event = get_lineups_for_event)
@@ -324,11 +313,18 @@ derive_shot_zone_columns <- function(df, home_id) {
 
 build_manual_table <- function(pbp, rosters, game_meta = NULL, season_context = NULL) {
   pbp_norm <- pbp
+  for (key in intersect(c("play_id", "id"), names(pbp_norm))) {
+    if (is.numeric(pbp_norm[[key]]) && any(abs(pbp_norm[[key]]) >= 2^53, na.rm = TRUE)) {
+      stop("ESPN returned rounded numeric play IDs; load source IDs as character before generation.", call. = FALSE)
+    }
+  }
   pbp_norm$play_id <- if ("play_id" %in% names(pbp_norm)) {
-    coalesce(as.character(pbp_norm$play_id), as.character(pbp_norm$id))
+    if ("id" %in% names(pbp_norm)) coalesce(as.character(pbp_norm$play_id), as.character(pbp_norm$id)) else as.character(pbp_norm$play_id)
   } else {
     as.character(pbp_norm$id)
   }
+  pbp_norm <- deduplicate_source_events(pbp_norm, provenance_cols = character(), label = "ESPN play-by-play")
+  pbp <- pbp_norm %>% arrange(sequence_number)
 
   pbp_norm <- pbp_norm %>%
     arrange(sequence_number) %>%
@@ -390,6 +386,9 @@ build_manual_table <- function(pbp, rosters, game_meta = NULL, season_context = 
       context_source = character()
     )
   }
+  context_tbl <- deduplicate_source_events(context_tbl, keys = c("game_id", "sequence_number"),
+    provenance_cols = character(), label = "ESPN game context") %>%
+    mutate(sequence_number = as.numeric(sequence_number))
 
   source_filtered <- pbp_norm %>%
     left_join(context_tbl, by = c("game_id", "sequence_number")) %>%
@@ -492,7 +491,7 @@ build_manual_table <- function(pbp, rosters, game_meta = NULL, season_context = 
   base$FGA3[is_shot] <- as.integer(base$points_attempted_norm[is_shot] == 3)
   base$FGM3[is_shot] <- as.integer(base$FGA3[is_shot] == 1 & base$scoring_play[is_shot] %in% TRUE)
   base$PTS[is_shot] <- as.integer(ifelse(base$scoring_play[is_shot] %in% TRUE, base$points_attempted_norm[is_shot], 0))
-  base$AST[is_shot] <- as.integer(!is.na(base$AssistPlayer[is_shot]) & base$AssistPlayer[is_shot] != "")
+  base$AST[is_shot] <- as.integer(base$FGM[is_shot] == 1L & !is.na(base$AssistPlayer[is_shot]) & base$AssistPlayer[is_shot] != "")
 
   base$UsagePlayer[is_to] <- parse_turnover_player(base$text[is_to])
   base$TOV[is_to] <- 1L
@@ -505,11 +504,12 @@ build_manual_table <- function(pbp, rosters, game_meta = NULL, season_context = 
         base$base_kind == "turnover" &
           base$period_number == s$period_number &
           base$sequence_number < s$sequence_number &
+          as.character(base$team_id) != as.character(s$team_id) &
           base$STL == 0L
       )
       if (length(cand) == 0) next
       cand <- cand[which.max(base$sequence_number[cand])]
-      if ((s$sequence_number - base$sequence_number[cand]) <= 3 || s$clock_display_value == base$clock_display_value[cand]) {
+      if (isTRUE(s$clock_display_value == base$clock_display_value[cand])) {
         base$StealPlayer[cand] <- parse_steal_player(s$text)
         base$STL[cand] <- 1L
       }
@@ -524,13 +524,14 @@ build_manual_table <- function(pbp, rosters, game_meta = NULL, season_context = 
         base$base_kind == "shot" &
           base$period_number == b$period_number &
           base$sequence_number < b$sequence_number &
+          as.character(base$team_id) != as.character(b$team_id) &
           base$FGA == 1L &
           base$FGM == 0L &
           (is.na(base$BlockPlayer) | base$BlockPlayer == "")
       )
       if (length(cand) == 0) next
       cand <- cand[which.max(base$sequence_number[cand])]
-      if ((b$sequence_number - base$sequence_number[cand]) <= 3 || b$clock_display_value == base$clock_display_value[cand]) {
+      if (isTRUE(b$clock_display_value == base$clock_display_value[cand])) {
         base$BlockPlayer[cand] <- parse_block_player(b$text)
         base$BLK[cand] <- 1L
       }
@@ -546,11 +547,14 @@ build_manual_table <- function(pbp, rosters, game_meta = NULL, season_context = 
           base$period_number == r$period_number &
           base$sequence_number < r$sequence_number &
           base$FGM == 0L &
+          base$FTM == 0L &
+          ifelse(r$type_text == "Offensive Rebound", as.character(base$team_id) == as.character(r$team_id),
+            as.character(base$team_id) != as.character(r$team_id)) &
           (is.na(base$ReboundPlayer) | base$ReboundPlayer == "")
       )
       if (length(cand) == 0) next
       cand <- cand[which.max(base$sequence_number[cand])]
-      if ((r$sequence_number - base$sequence_number[cand]) <= 6) {
+      if (isTRUE(r$clock_display_value == base$clock_display_value[cand])) {
         base$ReboundPlayer[cand] <- parse_rebound_player(r$text)
         if (r$type_text == "Offensive Rebound") base$OREB[cand] <- 1L
         if (r$type_text == "Defensive Rebound") base$DREB[cand] <- 1L
@@ -610,6 +614,14 @@ build_manual_table <- function(pbp, rosters, game_meta = NULL, season_context = 
     abs(base$margin_before) <= 5L
   base$offense_lineup_key <- canonicalize_lineup_key(base$OffenseOnCourt)
   base$defense_lineup_key <- canonicalize_lineup_key(base$DefenseOnCourt)
+  # Five names and plausible substitutions are only a reconstruction. Halftime
+  # states, omitted substitutions and event-to-player consistency are not yet
+  # independently reconciled, so this generator cannot certify any lineup.
+  base$lineup_source_verified <- FALSE
+  base$lineup_source_status <- ifelse(
+    !is.na(base$OffenseOnCourt) & !is.na(base$DefenseOnCourt),
+    "provisional_starters_and_substitutions_unverified", "requires_source_repair"
+  )
 
   base <- derive_shot_zone_columns(base, home_id = home_id)
 
@@ -626,7 +638,7 @@ build_manual_table <- function(pbp, rosters, game_meta = NULL, season_context = 
   )
   derived_cols <- c(
     "is_uconn_offense", "margin_before", "margin_after", "clutch_flag",
-    "offense_lineup_key", "defense_lineup_key"
+    "offense_lineup_key", "defense_lineup_key", "lineup_source_verified", "lineup_source_status"
   )
   extra_cols <- c(
     "sequence_number", "text",
@@ -642,7 +654,7 @@ build_manual_table <- function(pbp, rosters, game_meta = NULL, season_context = 
     mutate(clock_display_value = as.character(clock_display_value)) %>%
     select(all_of(c(stat_cols, context_cols, derived_cols, extra_cols)))
 
-  out
+  deduplicate_source_events(out, label = "Generated manual-game table")
 }
 
 date_event_cache <- new.env(parent = emptyenv())
@@ -740,7 +752,7 @@ build_game_context_from_summary <- function(game_id) {
     period_num <- suppressWarnings(as.integer(play$period$number %||% NA_integer_))
     clock_secs <- parse_clock_seconds(play$clock$displayValue %||% NA_character_)
     if (is.na(period_num) || is.na(clock_secs)) return(NA_integer_)
-    future_periods <- seq.int(period_num + 1L, max_period)
+    future_periods <- if (period_num < max_period) seq.int(period_num + 1L, max_period) else integer()
     future_secs <- if (length(future_periods) == 0) 0L else sum(period_length_seconds(future_periods))
     as.integer(clock_secs + future_secs)
   }
@@ -939,6 +951,11 @@ games_meta <- games_meta %>% filter(!is.na(game_date_parsed))
 if (nrow(games_meta) == 0) stop("No games selected after filters.", call. = FALSE)
 
 results <- list()
+existing_paths <- list_manual_game_csv_files(out_root)
+existing_games <- bind_rows(lapply(existing_paths, function(path) {
+  ids <- read_csv(path, show_col_types = FALSE, col_types = cols_only(game_id = col_character()))$game_id
+  tibble(game_id = unique(ids), path = path)
+}))
 for (i in seq_len(nrow(games_meta))) {
   g <- games_meta[i, ]
   game_file <- g$game_file[[1]]
@@ -974,6 +991,17 @@ for (i in seq_len(nrow(games_meta))) {
     next
   }
 
+  duplicate_paths <- if (nrow(existing_games)) existing_games$path[
+    existing_games$game_id == as.character(event_id) & existing_games$path != out_path
+  ] else character()
+  if (length(duplicate_paths)) {
+    message("[BLOCK] ", game_file, " already exists at another path; reconcile before generating: ",
+      paste(duplicate_paths, collapse = ", "))
+    results[[length(results) + 1]] <- tibble(game_file = game_file,
+      competition_bucket = competition_bucket, status = "blocked_duplicate_game", out_path = out_path)
+    next
+  }
+
   message("[RUN ] ", game_file, " -> event ", event_id)
   pbp <- espn_mbb_pbp(game_id = event_id) %>%
     mutate(
@@ -1001,7 +1029,14 @@ for (i in seq_len(nrow(games_meta))) {
       .before = game_file
     )
   dir.create(dirname(out_path), recursive = TRUE, showWarnings = FALSE)
+  if (file.exists(out_path)) {
+    backup_dir <- file.path(out_root, "_backup")
+    dir.create(backup_dir, recursive = TRUE, showWarnings = FALSE)
+    backup_path <- file.path(backup_dir, paste0(format(Sys.time(), "%Y%m%d_%H%M%OS6"), "_", basename(out_path)))
+    if (!file.copy(out_path, backup_path, overwrite = FALSE)) stop("Unable to back up ", out_path, call. = FALSE)
+  }
   write_csv(out_tbl, out_path, na = "")
+  existing_games <- bind_rows(existing_games, tibble(game_id = as.character(event_id), path = out_path))
   message("[DONE] ", basename(out_path), " (rows=", nrow(out_tbl), ")")
 
   results[[length(results) + 1]] <- tibble(
@@ -1022,3 +1057,4 @@ message("Summary: ", normalizePath(summary_path))
 message("Written: ", sum(res$status == "written", na.rm = TRUE))
 message("Skipped existing: ", sum(res$status == "skipped_exists", na.rm = TRUE))
 message("Missing events: ", sum(res$status == "missing_event", na.rm = TRUE))
+message("Blocked duplicate games: ", sum(res$status == "blocked_duplicate_game", na.rm = TRUE))

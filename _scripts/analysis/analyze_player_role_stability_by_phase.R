@@ -41,6 +41,32 @@ DELTA_SMALL <- 0.02  # within +/- 0.02 treated as "flat"
 DELTA_LARGE <- 0.04  # >= 0.04 treated as meaningful shift
 
 # Helpers
+prepare_role_stints <- function(stints) {
+  required <- c("points_for", "points_against", "poss_est")
+  missing <- setdiff(required, names(stints))
+  if (length(missing) > 0) {
+    stop("Missing source stint fields: ", paste(missing, collapse = ", "),
+         ". Possessions cannot be inferred from points.", call. = FALSE)
+  }
+  for (field in required) {
+    values <- suppressWarnings(as.numeric(stints[[field]]))
+    invalid <- !is.finite(values) | values < 0
+    if (field == "poss_est") invalid <- invalid | values <= 0
+    if (any(invalid)) {
+      stop("Invalid source stint field: ", field, ". Repair from source before analysis.", call. = FALSE)
+    }
+    stints[[field]] <- values
+  }
+  if (("analysis_eligible" %in% names(stints) && any(!stints$analysis_eligible %in% TRUE)) ||
+      ("source_repair_required" %in% names(stints) && any(!stints$source_repair_required %in% FALSE))) {
+    stop("Stints require source repair before role analysis.", call. = FALSE)
+  }
+  # Recompute derived rates rather than trusting a stale stored column.
+  stints$net_ppp <- (stints$points_for - stints$points_against) / stints$poss_est
+  if (any(!is.finite(stints$net_ppp))) stop("Non-finite computed net_ppp.", call. = FALSE)
+  stints
+}
+
 normalize_lineup <- function(x) {
   players <- str_split(x, "\\|", simplify = FALSE)[[1]]
   players <- str_trim(players)
@@ -156,13 +182,7 @@ required_cols <- c("game_id", "game_file", "uconn_lineup", "points_for", "points
 missing <- setdiff(required_cols, names(stints))
 if (length(missing) > 0) stop("Missing required columns in stints: ", paste(missing, collapse = ", "))
 
-# Ensure poss_est and net_ppp exist; compute if missing
-if (!("poss_est" %in% names(stints))) {
-  stints <- stints %>% mutate(poss_est = pmax(1, (points_for + points_against) / 2))
-}
-if (!("net_ppp" %in% names(stints))) {
-  stints <- stints %>% mutate(net_ppp = (points_for - points_against) / poss_est)
-}
+stints <- prepare_role_stints(stints)
 
 if (EXCLUDE_EXHIBITIONS) {
   stints <- stints %>%

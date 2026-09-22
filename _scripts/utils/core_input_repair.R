@@ -23,8 +23,11 @@ repair_uconn_stints_core_input <- function(
   if (!file.exists(stints_path)) {
     stop("Missing required stints file: ", stints_path, call. = FALSE)
   }
+  if (isTRUE(rewrite) && !isTRUE(backup)) {
+    stop("Rewriting core inputs requires backup=TRUE.", call. = FALSE)
+  }
 
-  timestamp <- format(Sys.time(), "%Y%m%d_%H%M%S")
+  timestamp <- format(Sys.time(), "%Y%m%d_%H%M%OS6")
   repaired_at_utc <- format(as.POSIXct(Sys.time(), tz = "UTC"), "%Y-%m-%dT%H:%M:%SZ")
 
   stints <- readr::read_csv(
@@ -84,10 +87,35 @@ repair_uconn_stints_core_input <- function(
   poss_est_new <- old_poss_est
 
   poss_invalid <- !is.finite(poss_est_new) | poss_est_new <= 0
-  total_pts <- dplyr::coalesce(points_for_new, 0) + dplyr::coalesce(points_against_new, 0)
-  has_points <- poss_invalid & total_pts > 0
-  poss_est_new[has_points] <- pmax(1, total_pts[has_points] / 2)
-  poss_est_new[poss_invalid & !has_points] <- 1
+  # Earlier versions filled zero/missing possessions using points or 1. Audit
+  # those persisted fills as well; a positive fabricated value is still invalid.
+  historical_imputed <- rep(FALSE, nrow(stints))
+  identity_cols <- c("game_file", "period", "stint_index", "start_time", "end_time")
+  prior_reports <- list.files(report_dir, pattern = "^uconn_stints_core_input_repair_report_.*\\.csv$", full.names = TRUE)
+  for (path in prior_reports) {
+    prior <- readr::read_csv(path, show_col_types = FALSE, col_types = readr::cols(.default = readr::col_character()))
+    if (!all(c(identity_cols, "reason_codes", "new_poss_est") %in% names(prior))) next
+    prior <- prior[grepl("poss_est_invalid_(repaired_from_points|defaulted_to_1)", prior$reason_codes), , drop = FALSE]
+    if (!nrow(prior)) next
+    matches <- dplyr::inner_join(
+      dplyr::mutate(stints[identity_cols], row_id = seq_len(nrow(stints))) %>%
+        dplyr::mutate(dplyr::across(dplyr::all_of(identity_cols), as.character)),
+      prior[c(identity_cols, "new_poss_est")], by = identity_cols
+    )
+    if (nrow(matches)) {
+      still_filled <- is.finite(old_poss_est[matches$row_id]) &
+        abs(old_poss_est[matches$row_id] - suppressWarnings(as.numeric(matches$new_poss_est))) < 1e-9
+      historical_imputed[matches$row_id[which(still_filled)]] <- TRUE
+    }
+  }
+  if ("poss_source_verified" %in% names(stints)) {
+    historical_imputed[stints$poss_source_verified %in% TRUE] <- FALSE
+  }
+  poss_est_new[poss_invalid | historical_imputed] <- NA_real_
+  lineup_invalid <- is.na(lineup_size_new) | lineup_size_new != 5L
+  points_invalid <- !is.finite(points_for_new) | !is.finite(points_against_new) |
+    points_for_new < 0 | points_against_new < 0
+  source_repair_required <- poss_invalid | historical_imputed | lineup_invalid | points_invalid
 
   net_pts_new <- ifelse(
     is.finite(points_for_new) & is.finite(points_against_new),
@@ -112,17 +140,18 @@ repair_uconn_stints_core_input <- function(
     (is.na(old_net_ppp) | is.na(net_ppp_new) | abs(old_net_ppp - net_ppp_new) > 1e-9)
 
   poss_reason <- ifelse(
-    !poss_invalid,
-    NA_character_,
-    ifelse(total_pts > 0, "poss_est_invalid_repaired_from_points", "poss_est_invalid_defaulted_to_1")
+    historical_imputed, "historical_imputed_possessions_require_source_repair",
+    ifelse(poss_invalid, "invalid_possessions_require_source_repair", NA_character_)
   )
+  source_reason <- ifelse(lineup_invalid, "invalid_lineup_requires_source_repair", NA_character_)
+  points_reason <- ifelse(points_invalid, "invalid_points_require_source_repair", NA_character_)
   lineup_reason <- ifelse(lineup_changed, "lineup_normalized", NA_character_)
   lineup_size_reason <- ifelse(lineup_size_changed, "lineup_size_recomputed", NA_character_)
   net_reason <- ifelse(net_pts_changed | net_ppp_changed, "net_fields_recomputed", NA_character_)
 
   reason_codes <- vapply(
     seq_len(nrow(stints)),
-    function(i) combine_reason_codes(poss_reason[[i]], lineup_reason[[i]], lineup_size_reason[[i]], net_reason[[i]]),
+    function(i) combine_reason_codes(poss_reason[[i]], source_reason[[i]], points_reason[[i]], lineup_reason[[i]], lineup_size_reason[[i]], net_reason[[i]]),
     character(1)
   )
 
@@ -134,7 +163,9 @@ repair_uconn_stints_core_input <- function(
       points_against = points_against_new,
       poss_est = poss_est_new,
       net_pts = net_pts_new,
-      net_ppp = net_ppp_new
+      net_ppp = net_ppp_new,
+      source_repair_required = source_repair_required,
+      analysis_eligible = !source_repair_required
     )
 
   changed_mask <- nzchar(reason_codes)
@@ -157,6 +188,7 @@ repair_uconn_stints_core_input <- function(
     new_net_pts = net_pts_new,
     old_net_ppp = old_net_ppp,
     new_net_ppp = net_ppp_new,
+    source_repair_required = source_repair_required,
     reason_codes = reason_codes,
     repaired_at_utc = repaired_at_utc
   ) %>%
@@ -168,6 +200,11 @@ repair_uconn_stints_core_input <- function(
     sprintf("uconn_stints_core_input_repair_report_%s.csv", timestamp)
   )
   readr::write_csv(repair_report, report_path)
+  quarantine_path <- file.path(report_dir, sprintf("uconn_stints_source_repair_quarantine_%s.csv", timestamp))
+  quarantine <- stints[source_repair_required, , drop = FALSE]
+  quarantine$source_row_id <- which(source_repair_required)
+  quarantine$source_repair_reason <- reason_codes[source_repair_required]
+  readr::write_csv(quarantine, quarantine_path)
 
   backup_path <- NA_character_
   if (isTRUE(rewrite)) {
@@ -188,8 +225,11 @@ repair_uconn_stints_core_input <- function(
   list(
     stints_path = stints_path,
     report_path = report_path,
+    quarantine_path = quarantine_path,
     backup_path = backup_path,
     changed_rows = changed_n,
+    quarantined_rows = sum(source_repair_required),
+    historical_imputed_rows = sum(historical_imputed),
     total_rows = nrow(stints),
     rewrite = isTRUE(rewrite)
   )
@@ -232,6 +272,10 @@ validate_uconn_stints_invariants <- function(
     rows = nrow(stints),
     poss_est_non_positive = sum(!is.finite(poss_est) | poss_est <= 0, na.rm = TRUE),
     lineup_size_mismatch = sum(!is.na(lineup_size) & lineup_size != lineup_size_calc, na.rm = TRUE),
-    net_ppp_mismatch = sum(is.finite(net_delta) & net_delta > tol, na.rm = TRUE)
+    net_ppp_mismatch = sum(
+      (is.finite(net_ppp_calc) & (!is.finite(net_ppp) | net_delta > tol)) |
+        (!is.finite(net_ppp_calc) & !is.na(net_ppp)),
+      na.rm = TRUE
+    )
   )
 }

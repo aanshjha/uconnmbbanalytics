@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Compatibility entrypoint: the current workflow owns its options and help.
 cd "$(dirname "$0")"
-Rscript --vanilla _scripts/ops/run_runnable_entrypoints.R "$@"
+bash run_coaching_pipeline.sh "$@"
