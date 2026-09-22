@@ -80,7 +80,7 @@ def lineup_state_rows(game_id, source_data, canonical_events):
     groups = collections.defaultdict(list)
     for event in canonical_events:
         groups[(event["period_number"], event["clock_display_value"])].append(event)
-    state_rows, issues = [], []
+    state_rows, issues, ordered_chains = [], [], []
     for (period, clock), events in groups.items():
         substitutions = [event for event in events if event["type_text"] == "Substitution"]
         for event in events:
@@ -110,26 +110,52 @@ def lineup_state_rows(game_id, source_data, canonical_events):
         for team_id, team_subs in by_team.items():
             if team_id not in active or active[team_id] is None:
                 continue
+            before = set(active[team_id])
             pairs = [(substitution_direction(raw_by_id[event["play_id"]]),
                       participant_id(raw_by_id[event["play_id"]])) for event in team_subs]
             outs = [athlete for direction, athlete in pairs if direction == "out"]
             ins = [athlete for direction, athlete in pairs if direction == "in"]
             remaining = active[team_id] - set(outs)
-            if (any(not direction or not athlete for direction, athlete in pairs)
-                    or len(outs) != len(set(outs)) or len(ins) != len(set(ins))
-                    or not set(outs) <= active[team_id]
-                    or bool(set(ins) & remaining)
-                    or len(remaining | set(ins)) != 5):
+            bulk_valid = (all(direction in ("out", "in") and athlete and (team_id, athlete) in names
+                              for direction, athlete in pairs)
+                          and len(outs) == len(set(outs)) and len(ins) == len(set(ins))
+                          and set(outs) <= active[team_id] and not set(ins) & remaining
+                          and len(remaining | set(ins)) == 5)
+            if bulk_valid:
+                updated, valid = remaining | set(ins), True
+            else:
+                # The feed can record a same-clock swap and its reversal. A valid
+                # ordered chain still establishes the state after that clock.
+                updated, valid = set(active[team_id]), True
+                for direction, athlete in pairs:
+                    if not athlete or (team_id, athlete) not in names:
+                        valid = False
+                        break
+                    if direction == "out" and athlete in updated:
+                        updated.remove(athlete)
+                    elif direction == "in" and athlete not in updated and len(updated) < 5:
+                        updated.add(athlete)
+                    else:
+                        valid = False
+                        break
+            if not valid or len(updated) != 5:
                 issues.append({"game_id": game_id, "period_number": period, "clock": clock,
                                "team_id": team_id, "play_ids": "|".join(event["play_id"] for event in team_subs),
                                "reason": "invalid_substitution_group"})
                 active[team_id] = None
             else:
-                active[team_id] = remaining | set(ins)
+                active[team_id] = updated
+                if not bulk_valid:
+                    ordered_chains.append({"game_id": game_id, "period_number": period,
+                                           "clock": clock, "team_id": team_id,
+                                           "play_ids": "|".join(event["play_id"] for event in team_subs),
+                                           "lineup_before_ids": "|".join(sorted(before)),
+                                           "lineup_after_ids": "|".join(sorted(updated)),
+                                           "status": "source_order_resolves_same_clock_chain"})
     players = [{"game_id": game_id, "team_id": team_id, "athlete_id": athlete_id,
                 "display_name": name, "starter": athlete_id in starters[team_id]}
                for (team_id, athlete_id), name in sorted(names.items())]
-    return state_rows, issues, players
+    return state_rows, issues, players, ordered_chains
 
 
 def is_action(event):
@@ -323,7 +349,7 @@ def run(root=ROOT, output_dir=OUTPUT):
     stints = source.read_csv(root / "_data/01_core_inputs/uconn_stints_from_pbp.csv")
     imputed_keys, report_count = imputed_possession_keys(root / "_outputs/00_qc", stints)
     games_by_file = {game["game_file"]: game for game in games}
-    all_states, all_issues, all_players, all_possessions, all_exclusions = [], [], [], [], []
+    all_states, all_issues, all_players, all_chains, all_possessions, all_exclusions = [], [], [], [], [], []
     events_by_game, game_rows = {}, []
     for game in games:
         game_id = game["game_id"]
@@ -337,11 +363,12 @@ def run(root=ROOT, output_dir=OUTPUT):
                 int(game["opponent_points"]) != rebuilt_game["opponent_points"] or
                 any(not comparison["matched"] for comparison in comparisons)):
             raise ValueError(f"Reconciled game differs from cached source: {game_id}")
-        states, issues, players = lineup_state_rows(game_id, source_data, events)
+        states, issues, players, chains = lineup_state_rows(game_id, source_data, events)
         opponent_id = next(str(team["id"]) for team in source_data["header"]["competitions"][0]["competitors"]
                            if str(team["id"]) != "41")
         possessions, exclusions = bounded_possessions(states, opponent_id)
         for collection, values in ((all_states, states), (all_issues, issues), (all_players, players),
+                                   (all_chains, chains),
                                    (all_possessions, possessions), (all_exclusions, exclusions)):
             collection.extend(values)
         events_by_game[game_id] = events
@@ -378,6 +405,9 @@ def run(root=ROOT, output_dir=OUTPUT):
                ["game_id", "team_id", "athlete_id", "display_name", "starter"])
     write_rows(output_dir / "substitution_issues.csv", all_issues,
                ["game_id", "period_number", "clock", "team_id", "play_ids", "reason"])
+    write_rows(output_dir / "ordered_substitution_chains.csv", all_chains,
+               ["game_id", "period_number", "clock", "team_id", "play_ids",
+                "lineup_before_ids", "lineup_after_ids", "status"])
     possession_fields = ["game_id", "offense_team_id", "start_play_id", "start_period", "start_clock",
                          "start_reason", "end_play_id", "end_reason", "event_ids", "uconn_lineup_ids",
                          "opponent_lineup_ids", "points_scored", "source_sha256", "status", "exclusion_reason"]
@@ -391,6 +421,7 @@ def run(root=ROOT, output_dir=OUTPUT):
                "source_bounded_possessions": len(all_possessions),
                "excluded_possession_candidates": len(all_exclusions),
                "substitution_issues": len(all_issues),
+               "ordered_same_clock_chains_resolved": len(all_chains),
                "core_stints": len(stints), "definite_core_stint_point_mismatches": sum(
                    row["status"] == "definite_points_mismatch" for row in stint_rows),
                "core_games_with_score_mismatches": sum(row["status"] == "legacy_score_mismatch" for row in core_game_rows),

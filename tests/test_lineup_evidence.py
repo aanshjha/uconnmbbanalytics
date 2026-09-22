@@ -41,6 +41,10 @@ class LineupEvidenceTests(unittest.TestCase):
                 {'id': 'in2', 'text': 'subbing in', 'participants': [{'athlete': {'id': '6'}}]},
                 {'id': 'score2', 'participants': [{'athlete': {'id': '6'}}]},
                 {'id': 'score3', 'participants': [{'athlete': {'id': '6'}}]},
+                {'id': 'chainout1', 'text': 'subbing out', 'participants': [{'athlete': {'id': '6'}}]},
+                {'id': 'chainin1', 'text': 'subbing in', 'participants': [{'athlete': {'id': '1'}}]},
+                {'id': 'chainout2', 'text': 'subbing out', 'participants': [{'athlete': {'id': '1'}}]},
+                {'id': 'chainin2', 'text': 'subbing in', 'participants': [{'athlete': {'id': '6'}}]},
                 {'id': 'out4', 'text': 'subbing out', 'participants': [{'athlete': {'id': '2'}}]},
                 {'id': 'in4', 'text': 'subbing in', 'participants': [{'athlete': {'id': '6'}}]},
                 {'id': 'score5', 'participants': [{'athlete': {'id': '3'}}]},
@@ -51,18 +55,24 @@ class LineupEvidenceTests(unittest.TestCase):
                 event('in2', '18:00', '41', 'Substitution'),
                 event('score2', '18:00', '41', 'JumpShot', 2),
                 event('score3', '17:00', '41', 'JumpShot', 2),
+                event('chainout1', '16:30', '41', 'Substitution'),
+                event('chainin1', '16:30', '41', 'Substitution'),
+                event('chainout2', '16:30', '41', 'Substitution'),
+                event('chainin2', '16:30', '41', 'Substitution'),
                 event('out4', '16:00', '41', 'Substitution'),
                 event('in4', '16:00', '41', 'Substitution'),
                 event('score5', '15:00', '41', 'JumpShot', 2)]
-        states, issues, _ = audit.lineup_state_rows('fixture', data, rows)
+        states, issues, _, chains = audit.lineup_state_rows('fixture', data, rows)
         self.assertEqual([row['lineup_state_status'] for row in states],
                          ['source_consistent_five_player_state'] + ['same_clock_substitution']*3
-                         + ['source_consistent_five_player_state'] + ['same_clock_substitution']*2
+                         + ['source_consistent_five_player_state'] + ['same_clock_substitution']*6
                          + ['unresolved_player_state'])
         self.assertIn('6', states[4]['uconn_lineup_ids'])
-        self.assertEqual(states[7]['uconn_lineup_ids'], '')
+        self.assertEqual(states[-1]['uconn_lineup_ids'], '')
         self.assertEqual(len(issues), 1)
         self.assertEqual(issues[0]['reason'], 'invalid_substitution_group')
+        self.assertEqual(len(chains), 1)
+        self.assertEqual(chains[0]['lineup_before_ids'], chains[0]['lineup_after_ids'])
 
     def test_possession_needs_explicit_end_and_stable_lineups(self):
         rows = [event('a', '10:00', '57', 'Turnover', TOV=1),

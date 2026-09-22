@@ -25,7 +25,7 @@ python3 -m unittest discover -s tests -p 'test_*.py' -v
 | `test_source_reconciliation.py` | Exact event IDs, duplicate/conflicting events, final-score arithmetic, and event-to-box totals. |
 | `test_pregame_evaluation.py` | Prior-date training, future-data invariance, train-only scaling, matched baselines, metrics, and provenance. |
 | `test_staff_pilot.py` | Conservative possession boundaries, source evidence, packet integrity, actual timer lifecycle, and human-result validation. |
-| `test_lineup_evidence.py` | Substitution ambiguity, invalid five-player transitions, conservative possession endings, clock-bound point bounds, and historical-fill provenance. |
+| `test_lineup_evidence.py` | Substitution ambiguity and reversible same-clock chains, invalid five-player transitions, conservative possession endings, clock-bound point bounds, and historical-fill provenance. |
 
 These tests use Python's standard-library `unittest` runner.
 
