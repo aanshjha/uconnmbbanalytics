@@ -9,6 +9,17 @@ source(normalizePath(file.path(dirname(.local_script_path), "..", "utils", "boot
 bootstrap_project(.local_script_path)
 rm(.local_script_path)
 
+# Historical V4 outputs are invalid as pregame validation: full-season profiles,
+# held-out game baselines, and forward-test outcomes entered scoring/selection.
+# Keep the implementation below for audit history, but fail before loading data
+# or cached models so old pipeline entrypoints cannot silently recreate it.
+stop(
+  "Legacy lineup backtest retired: temporal leakage and unreconciled stint inputs. ",
+  "Run python3 _scripts/analysis/evaluate_pregame_defense.py after source reconciliation. ",
+  "The replacement evaluates game points conceded; lineup validation remains unavailable.",
+  call. = FALSE
+)
+
 # Rolling game-level holdout backtest for the lineup decision table.
 # Trains on prior games only, scores the next game, and summarizes calibration
 # plus realized outcomes by decision bucket.

@@ -1,5 +1,12 @@
 #!/usr/bin/env Rscript
 
+stop(
+  "The legacy lineup workflow is retired: source stint totals and possession attribution are not verified, ",
+  "and its decision backtest used future information. Run bash run_coaching_pipeline.sh for the ",
+  "source reconciliation, pregame baseline evaluation, and postgame review pilot. See docs/RELIABILITY_RESET.md.",
+  call. = FALSE
+)
+
 .local_script_path <- local({
   script_arg <- grep("^--file=", commandArgs(), value = TRUE)
   if (length(script_arg) == 0) {

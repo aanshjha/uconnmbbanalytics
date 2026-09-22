@@ -1,3 +1,9 @@
+stop(
+  "Legacy calibration is not releasable: the scored target and future-informed decision score were incompatible. ",
+  "Run python3 _scripts/analysis/evaluate_pregame_defense.py; see docs/PREGAME_EVALUATION.md.",
+  call. = FALSE
+)
+
 .local_script_path <- local({
   script_arg <- grep("^--file=", commandArgs(), value = TRUE)
   if (length(script_arg) == 0) {

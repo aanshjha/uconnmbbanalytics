@@ -9,6 +9,15 @@ source(normalizePath(file.path(dirname(.local_script_path), "..", "utils", "boot
 bootstrap_project(.local_script_path)
 rm(.local_script_path)
 
+# The historical posterior-sign score and outcome-relative-to-test-mean were
+# different targets; unreconciled stints also invalidate lineup-level claims.
+stop(
+  "Legacy defensive lineup validation retired: target mismatch and unreconciled stint inputs. ",
+  "Run python3 _scripts/analysis/evaluate_pregame_defense.py after source reconciliation. ",
+  "Do not interpret historical leak scores as calibrated future-game probabilities.",
+  call. = FALSE
+)
+
 # Time-split holdout validation for the defense leaks module.
 # Fits the defense-only Stan model on early games, then evaluates whether the
 # lineup leak signal (pr_leak / u_def_mean) separates late-game defensive outcomes.
