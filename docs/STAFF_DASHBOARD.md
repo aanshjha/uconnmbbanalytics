@@ -31,7 +31,7 @@ The section labels organize the presentation. They do not change the release sta
 
 ## Hosting Status
 
-The existing Sites project has a hosted URL and is currently configured with custom access. The current task changes local organization only; it does not publish changes or change access. Local edits appear on the hosted website only after a separate publication.
+An existing hosted copy has a URL and is currently configured with restricted access. Local edits appear on the hosted website only after a separate publication. Deployment settings are kept outside this repository.
 
 The website's own [README](../staff-dashboard/README.md) documents the separate project. The [historical dashboard guide](archive/STAFF_DASHBOARD.md) retains the earlier export and presentation instructions for audit.
 

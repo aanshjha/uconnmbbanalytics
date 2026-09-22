@@ -6,7 +6,7 @@
 
 > **Publication suspended September 16, 2026.** The historical exporter now stops because its lineup recommendations and validation inputs are not reliable. Use [the reconciled workflow and postgame pilot](../RELIABILITY_RESET.md). The existing hosted snapshot has not been updated; the instructions below document the historical website and are not the current release workflow.
 
-The presentation website is a separate checkout in `staff-dashboard/`. Its source and selected output snapshot are published privately through Sites. The existing Shiny app remains available through `run_dashboard.sh`.
+The presentation website is a separate checkout in `staff-dashboard/`. Its source and selected output snapshot were published privately through a hosting service. The existing Shiny app remains available through `run_dashboard.sh`.
 
 ## Open locally
 
@@ -22,7 +22,7 @@ Open `http://127.0.0.1:4173`. Use an alternative port by passing it as the first
 2. Run `bash run_coaching_pipeline.sh`. After the R pipeline succeeds, it exports the selected dashboard data automatically. Python/export errors are reported with a nonzero exit code.
 3. For presentation-only changes or already-generated outputs, run `python3 _scripts/dashboard/export_staff_dashboard.py` without refitting models.
 4. Use **Reload snapshot** in the local dashboard to load the new export.
-5. Republish the existing Sites project to update its hosted URL. A browser reload does not fetch ESPN data, run R, or publish local changes.
+5. Republish the existing hosted website to update its URL content. A browser reload does not fetch ESPN data, run R, or publish local changes.
 
 The manifest runner `run_everything.sh` does not call the Bash coaching wrapper; run the export command after it finishes. A direct invocation of the R pipeline likewise requires a separate export.
 
