@@ -30,3 +30,7 @@ _models/.Rapp.history
 *.db-*
 *.sqlite
 *.sqlite-*
+
+# Separate private Sites checkout, including generated analysis snapshot
+/staff-dashboard/
+__pycache__/

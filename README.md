@@ -1,192 +1,67 @@
-# UConn Men's Basketball — Coaching Analytics Platform
+# UConn Basketball Analytics
 
-A Bayesian lineup optimization and defensive risk system built in **R** and **Stan** for the UConn Men's Basketball coaching staff. It turns play-by-play stint data into calibrated, auditable coaching recommendations — separating stable lineup signals from small-sample noise.
+Source-checked game data, pregame evaluation, and a short postgame defensive review with source-linked possession examples.
 
----
+[Documentation](docs/README.md) · [Project structure](docs/PROJECT_STRUCTURE.md) · [Current findings](docs/RELIABILITY_RESET.md) · [Staff pilot](docs/STAFF_PILOT.md) · [Dashboard](docs/STAFF_DASHBOARD.md)
 
-## Key Visuals
-
-### Probability Calibration Curve
-How reliably does the model's predicted "net-positive probability" match actual holdout outcomes?
-
-![Probability Calibration Curve](docs/images/uconn_pred_pr_net_pos_calibration_curve.png)
-
-### Game-Level Defensive Leak Trend
-Are defensive breakdowns improving or compounding across the season?
-
-![Game-Level Defensive Leak Trend](docs/images/uconn_game_level_def_leak_trend.png)
-
----
-
-## What This Project Does
-
-| Module | What It Produces |
-|---|---|
-| **Lineup Optimization** | Bayesian net-PPP estimates, synergy posteriors, and decision labels (`PLAY MORE`, `LEAN IN`, `NEUTRAL`, `LIMIT / WATCH`, `TOO SMALL`) |
-| **Defensive Leak Detection** | Lineup-level leak probabilities, game attribution, repeat-offender flags, and game-by-game trend |
-| **Player Role Analysis** | Role concentration index (RCI), three-phase stability tracking, and creation profiles |
-| **Decision Audit** | Rolling holdout backtests, Platt calibration, eligibility gates, and availability stress tests |
-| **Opponent Scouting** | Shot maps, zone profiles, lineup matchups, turnover analysis, and clutch-event summaries from ESPN PBP |
-| **Interactive Dashboard** | Shiny app with Coach View, Game Board, Player Out, and Technical Data tabs |
-
----
+**Historical lineup recommendations and probability-calibration claims are withdrawn.** The earlier pipeline passed schema checks despite duplicate events, incorrect stint totals, and future information in evaluation. Those outputs remain available for audit; they are not current validated findings.
 
 ## Quick Start
 
-### Prerequisites
-
-- **R** (≥ 4.0) with packages: `data.table`, `ggplot2`, `rstan` or `cmdstanr`
-- **Stan** (via CmdStan or RStan)
-- Core input CSVs in `_data/01_core_inputs/` (see [Data Availability](#data-availability))
-
-### Run the Full Pipeline
+Python 3.9+ is sufficient for the current workflow:
 
 ```bash
 bash run_coaching_pipeline.sh
 ```
 
-This executes 15 analysis steps in dependency order — from model fitting through QC gates.
+This rebuilds canonical data from the cached ESPN source, runs the rolling pregame evaluation, creates the UConn–Florida demonstration review, and summarizes actual human pilot sessions. It does not start a timer or create human results. `run_everything.sh` is an alias for the same workflow. If source snapshots are missing, use `bash run_coaching_pipeline.sh --fetch`. Use `--refresh` only to explicitly replace cached source snapshots.
 
-### Run Everything (Pipeline + Scouts + Scheme Model)
+The local input CSVs and source snapshots are private working files and remain gitignored. A fresh checkout needs the manual game files containing source game IDs and the core game/stint files for the reconciliation audit.
 
-```bash
-bash run_everything.sh
-```
+## Current Results
 
-### Launch the Dashboard
+- **32 games:** final scores and all **640 team-stat comparisons** match source events and ESPN box totals.
+- **14,589 canonical source events:** exact string IDs, source URLs, retrieval timestamps, and content hashes.
+- **1,032 redundant manual rows:** excluded from the canonical data; originals are preserved.
+- **Eight covered games have incorrect core-stint point totals.** Two exhibition games have no matching source snapshot. Lineup and possession attribution remains unverified, so lineup recommendations are not released.
+- **27 pregame test games:** the expanding-mean baseline has 8.599-point MAE; ridge has 8.679; last-three mean has 11.309. The model does not beat the expanding mean.
+- **Staff trial prepared:** a Florida demonstration review, Butler baseline packet, DePaul report packet, and a timing/usefulness recorder. The assigned human trial has not started; staff time savings and usefulness remain unmeasured.
 
-```bash
-bash run_dashboard.sh
-# → http://127.0.0.1:3838
-```
+The forecast target is opponent final points, which includes pace, game length and opponent strength. It does not validate lineup effects or defensive efficiency. Historical data were retrieved retrospectively; original feed vintages are unavailable. Intermediate scoreboard inconsistencies are reported separately from reconciled final totals.
 
----
+## Find Your Next Step
 
-## Project Structure
-
-```
-.
-├── _scripts/
-│   ├── pipeline/          # Orchestration: coaching pipeline, backtest, stress test
-│   ├── models/            # Stan model fitting (core lineup, defense, scheme matchup)
-│   ├── analysis/          # Post-fit tables, validation, calibration, attribution
-│   ├── dashboard/         # Shiny dashboard (app.R, data_loader.R)
-│   ├── ops/               # Cleanup, repair, manifest runner
-│   └── utils/             # Shared helpers (paths, bootstrap, model utilities)
-├── _models/               # Stan model files (.stan) + cached fits (.rds, gitignored)
-├── _data/                 # Input CSVs (gitignored — see Data Availability)
-├── _outputs/              # Generated CSVs, PNGs, scout reports (gitignored)
-├── docs/
-│   ├── REFERENCE.md       # Full internal reference documentation
-│   └── images/            # Tracked images for README display
-├── run_coaching_pipeline.sh
-├── run_everything.sh
-├── run_dashboard.sh
-├── FINAL_FINDINGS.md      # Completed analytical findings
-├── SUBMISSION_BRIEF.md    # Rubric-mapped submission summary
-└── LICENSE                # MIT
-```
-
----
-
-## Pipeline Architecture
-
-The coaching pipeline (`run_coaching_pipeline.R`) runs in a deliberate order — reliability checks upstream of recommendations:
-
-1. **Defense leak model** → lineup leak posteriors
-2. **Shot diet + creation profiles** → context primitives
-3. **Rolling holdout backtest** → decision threshold evidence
-4. **Probability calibration** → reliability diagnostics
-5. **Core lineup model** → synergy + decision tables
-6. **Player role tables** → RCI + phase stability
-7. **Defense coach table + holdout validation** → watchlist language
-8. **Stabilizers + attribution + trend** → game-level accountability
-9. **Stress test + eligibility audit** → guardrail layer
-10. **Output organization + post-flight QC** → final gate
-
-> Reliability is upstream of recommendation language. The system decides whether confidence is earned before producing action labels.
-
----
-
-## Bayesian Modeling
-
-### Core Lineup Model (`uconn_lineup_gamelevel_offdef.stan`)
-- **Outcome**: Net points per possession (possession-weighted)
-- **Effects**: Player net effects + lineup synergy residual + opponent controls + site + game-state
-- **Key feature**: Sum-to-zero constraints for identifiability; partial pooling prevents small-sample overreaction
-
-### Defense Leak Model (`uconn_lineup_gamelevel_defonly.stan`)
-- **Outcome**: Defensive PPP (points against per possession)
-- **Signal**: `pr_leak = P(u_def > 0)` — posterior probability that a lineup leaks defensively beyond baseline
-
-### Scheme Matchup Model (`uconn_scheme_matchup_ppp.stan`)
-- **Outcome**: PPP by action × coverage matchup
-- **Design**: Hierarchical action, coverage, interaction, team, and lineup effects with time-split validation
-
----
-
-## Validation Philosophy
-
-Validation is built into the workflow, not bolted on afterward:
-
-- **Rolling backtests**: Train on prior games only, score next-game holdouts — strict no-leakage time ordering
-- **Probability calibration**: Platt scaling with strict quality gates; conservative shrink-to-0.5 fallback when gates fail
-- **Defensive holdout**: Time-split validation checks whether risk buckets separate actual holdout defense outcomes
-- **Eligibility gates**: Block weak-sample or unstable lineups from reaching decision labels
-
-Key validation scripts:
-- [`evaluate_net_probability_calibration.R`](_scripts/analysis/evaluate_net_probability_calibration.R)
-- [`run_rolling_lineup_decision_backtest.R`](_scripts/pipeline/run_rolling_lineup_decision_backtest.R)
-- [`validate_defensive_leak_signal_holdout.R`](_scripts/analysis/validate_defensive_leak_signal_holdout.R)
-
----
-
-## Data Availability
-
-This repo tracks **source code only**. Private data and generated outputs are gitignored.
-
-### Required Input Files (not included)
-
-| File | Location | Purpose |
-|---|---|---|
-| `uconn_stints_from_pbp.csv` | `_data/01_core_inputs/` | Stint-level play-by-play data |
-| `uconn_games_meta.csv` | `_data/01_core_inputs/` | Game metadata (dates, opponents, site) |
-| `opponent_controls.csv` | `_data/01_core_inputs/` | Opponent adjusted efficiency ratings |
-
-The pipeline will fail fast with clear error messages if any required input is missing.
-
-### Public Data Path
-
-ESPN play-by-play data can be generated via:
-```bash
-Rscript --vanilla _scripts/analysis/generate_manual_game_csvs_from_espn.R
-```
-This uses the `hoopR` package to pull public ESPN college basketball data.
-
----
-
-## Key Findings (2025–26 Season)
-
-See [`FINAL_FINDINGS.md`](FINAL_FINDINGS.md) for the full report. Highlights:
-
-- **14 of 126 lineup rows** reached full sample status; the rest are marked `low_sample`
-- **Highest-volume stable lineup**: Ball Solo | Demary Jr. | Karaban | Mullins | Reed Jr. — 560 possessions, 23 games, raw net PPP +0.180
-- **Top player by positive net probability**: Demary Jr., Silas — 0.868 posterior probability of positive net impact
-- **Defensive leak detection**: 4 `LEAK RISK` rows, 19 `WATCH (LEAK SIGNAL)` rows identified
-- **Decision validation**: 415 backtest rows across 27 holdout games and 2,073 holdout possessions
-
----
-
-## Documentation
-
-| Document | Purpose |
+| Artifact | Location |
 |---|---|
-| [`SUBMISSION_BRIEF.md`](SUBMISSION_BRIEF.md) | Rubric-mapped project summary |
-| [`FINAL_FINDINGS.md`](FINAL_FINDINGS.md) | Complete analytical findings report |
-| [`docs/REFERENCE.md`](docs/REFERENCE.md) | Full internal reference (data dictionary, CSV contracts, file atlas, system logic, runbook) |
+| All current guides | [Documentation index](docs/README.md) |
+| Folder responsibilities and field labels | [Project structure and naming](docs/PROJECT_STRUCTURE.md) |
+| Reconciliation and release status | [Data reconciliation](docs/RELIABILITY_RESET.md) |
+| Pregame protocol and limitations | [Evaluation guide](docs/PREGAME_EVALUATION.md) |
+| Staff trial instructions | [Pilot guide](docs/STAFF_PILOT.md) |
+| Canonical game/event CSVs | `_data/02_derived_inputs/reconciled_games.csv`, `reconciled_events.csv` |
+| Source checks and core exclusions | `_outputs/00_qc/` |
+| Forecasts, metrics and fold provenance | `_outputs/08_reconciled_evaluation/` |
+| Demonstration review and evidence | `_outputs/08_staff_pilot/401812793/defensive_review.html` |
+| Assigned trial and packet locations | `_outputs/08_staff_pilot/trial_assignment.json` |
 
----
+The [historical archive](docs/archive/README.md) retains earlier findings, submission materials, model documentation, and website instructions as audit records. Their old validation conclusions are superseded.
+
+## Verification
+
+```bash
+bash run_checks.sh
+# Require the private inputs and fail if any are missing:
+bash run_checks.sh --require-real-data
+```
+
+The runner checks shell, Python, R, Stan, and website JavaScript syntax, then runs the Python and R regression suites. When private inputs are present, it also rebuilds the current pipeline in a temporary directory without changing saved outputs or human trial data. `--fixtures-only` skips that rebuild. See [check requirements and interpretation](tests/README.md). Passing checks does not validate lineup attribution, coaching recommendations, or staff usefulness.
+
+## Historical Models and Website
+
+The project retains R/Stan lineup, player, defensive-risk, scouting, and Shiny implementations. Their current model inputs are not certified for recommendations. Legacy R analysis, fitting, and batch entrypoints stop with an explanation before writing new recommendation files. The Shiny dashboard remains a clearly labeled historical view, and the historical staff exporter is suspended.
+
+The separate staff presentation website in `staff-dashboard/` is documented in the [dashboard guide](docs/STAFF_DASHBOARD.md), including the local preview command. Its existing hosted snapshot has not been republished. `run_staff_dashboard.sh` is suspended by the exporter guard; use the review workflow for this pilot. The old Shiny dashboard is an archival view of existing outputs.
 
 ## License
 
-MIT — see [`LICENSE`](LICENSE). The license covers source code only; local/private data and excluded third-party materials are not part of this license.
+[MIT](LICENSE) covers source code. Private data and third-party materials are excluded.
